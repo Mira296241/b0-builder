@@ -584,7 +584,8 @@ with right:
                 P.hist_panel(a2[0], an["res"], scfg["f_MHz"])
                 a2[0].set_title("leftover field after shimming")
                 pk = an["nu"][int(np.argmax(an["sp"]))]
-                a2[1].plot(an["nu"] - pk, an["sp"], color="#2f6fb5", lw=1.8)
+                a2[1].plot(an["nu"] - pk, np.clip(an["sp"], 1e-6, None),
+                           color="#2f6fb5", lw=1.8)
                 w11 = wd["w011"] if np.isfinite(wd["w011"]) else 10*nat
                 xr = max(0.8 * w11, 3 * nat)
                 a2[1].set_xlim(-xr, xr)
@@ -599,7 +600,11 @@ with right:
                 a2[1].set_title("same line, log scale")
                 a2[1].grid(color=P.GRID, lw=0.8)
                 f2.tight_layout(w_pad=2.5)
-                st.pyplot(f2)
+                try:
+                    show(f2)
+                except Exception:
+                    plt.close(f2)
+                    st.caption("This plot could not be drawn on this server.")
                 st.caption(f"{an['n']} voxels detected, voxel "
                            f"{sol['V']} mm, detection "
                            f"{an['z0']:.1f} to {an['z1']:.1f} mm, radius "
