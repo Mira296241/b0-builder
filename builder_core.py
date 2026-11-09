@@ -281,25 +281,31 @@ def build_all(cfg, x, y, z):
 # ---------------------------------------------------------------- field
 
 def field_fast(chi, V, pad=2):
-    """dBz/B0 in ppm. Same as b0core.field_shift_ppm, real FFT, slab-wise
-    kernel so the padded k-space never needs a second full-size array."""
+    """dBz/B0 in ppm. Same maths as b0core.field_shift_ppm, with a real FFT
+    in single precision and the kernel applied slab by slab, so the padded
+    k-space never needs a second full-size array. Single precision halves
+    the memory and the time; against double it differs by about 3e-6 ppm
+    on the full FRASCAN II probe, a thousand times below the shimmed
+    residual."""
+    f4 = np.float32
     n = chi.shape
     N = tuple(int(s * pad) for s in n)
-    F = _fft.rfftn(chi, s=N, **_KW)
-    ky = np.fft.fftfreq(N[1], d=V)[:, None]
-    kz = np.fft.rfftfreq(N[2], d=V)[None, :]
+    F = _fft.rfftn(chi.astype(f4, copy=False), s=N, **_KW)
+    ky = np.fft.fftfreq(N[1], d=V)[:, None].astype(f4)
+    kz = np.fft.rfftfreq(N[2], d=V)[None, :].astype(f4)
     kx = np.fft.fftfreq(N[0], d=V)
     kyz2 = ky**2 + kz**2
     kz2 = kz**2
+    third = f4(1.0 / 3.0)
     for i in range(N[0]):
-        k2 = kx[i]**2 + kyz2
+        k2 = f4(kx[i]**2) + kyz2
         with np.errstate(divide="ignore", invalid="ignore"):
-            D = 1.0/3.0 - kz2 / k2
+            D = third - kz2 / k2
         if i == 0:
             D[0, 0] = 0.0
         F[i] *= D
     out = _fft.irfftn(F, s=N, **_KW)
-    return np.ascontiguousarray(out[:n[0], :n[1], :n[2]])
+    return np.ascontiguousarray(out[:n[0], :n[1], :n[2]], dtype=f4)
 
 
 def solve(cfg):
@@ -309,6 +315,49 @@ def solve(cfg):
     dB = field_fast(chi, V)
     return dict(x=x, y=y, z=z, V=V, note=note, dB=dB, liq=masks["sample"],
                 j=len(y)//2)
+
+
+# ------------------------------------------------------------- shimming
+
+SHIM_LABELS = {0: "none", 1: "linear (x, y, z)",
+               2: "2nd order (z², xy, …)", 3: "3rd order (z³, …)",
+               4: "4th order (z⁴, …)"}
+
+
+def shim_basis(X, Y, Z, mask, order):
+    """What a shim set up to `order` can produce: every real solid harmonic
+    r^l P_l^m(cos θ) {cos, sin}(m φ) with l <= order, sampled on the mask.
+    2l+1 functions per order (25 up to 4th). For order <= 2 this spans
+    exactly the same space as b0core.shim_matrix. Centred on the detection
+    region and scaled, only for numerical conditioning: the space itself
+    does not change under a shift."""
+    from numpy.polynomial import Legendre
+    xa, ya, za = (np.asarray(a[mask], float) for a in (X, Y, Z))
+    xa = xa - xa.mean(); ya = ya - ya.mean(); za = za - za.mean()
+    L = max(np.sqrt(xa**2 + ya**2 + za**2).max(), 1e-9)
+    xa, ya, za = xa / L, ya / L, za / L
+    r = np.sqrt(xa**2 + ya**2 + za**2)
+    ct = np.where(r > 0, za / np.where(r > 0, r, 1), 1.0)
+    st_ = np.sqrt(np.clip(1 - ct**2, 0, None))
+    ph = np.arctan2(ya, xa)
+    cols = [np.ones_like(xa)]
+    for l in range(1, order + 1):
+        rl = r**l
+        Pl = Legendre.basis(l)
+        for m in range(0, l + 1):
+            Plm = (Pl.deriv(m) if m else Pl)(ct) * st_**m
+            cols.append(rl * Plm * np.cos(m * ph))
+            if m > 0:
+                cols.append(rl * Plm * np.sin(m * ph))
+    return np.vstack(cols).T
+
+
+def shim_any(dB, X, Y, Z, mask, order):
+    """Residual after the best shim set up to `order` (0 to 4)."""
+    A = shim_basis(X, Y, Z, mask, order)
+    b = np.asarray(dB[mask], float)
+    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+    return b - A @ coef
 
 
 def analyse(sol, cfg):
@@ -324,8 +373,100 @@ def analyse(sol, cfg):
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij", sparse=True)
     X, Y, Z = np.broadcast_arrays(X, Y, Z)
     order = int(cfg["sh_order"])
-    rep = report(dB, act, X, Y, Z, f_MHz=cfg["f_MHz"], order=order)
-    res = shim(dB, X, Y, Z, act, order=order)
+    raw = np.asarray(dB[act], float)
+    res = shim_any(dB, X, Y, Z, act, order)
+    rep = {"raw_ppm_pp": float(raw.max() - raw.min()),
+           "raw_ppm_rms": float(raw.std()),
+           "shim_ppm_pp": float(res.max() - res.min()),
+           "shim_ppm_rms": float(res.std()),
+           "shim_Hz_rms": float(res.std() * cfg["f_MHz"])}
     nu, sp, wd = lineshape_report(res, cfg["f_MHz"], nat_Hz=cfg["nat"])
-    return dict(rep=rep, res=res, raw=dB[act], nu=nu, sp=sp, wd=wd,
-                n=n, z0=z0, z1=z1, r=r)
+    # how the answer depends on the shim order: the honest error bar on
+    # "what would I measure", since nobody knows how well a real shim set
+    # was actually set.
+    by_order = []
+    for o in range(5):
+        ro = res if o == order else shim_any(dB, X, Y, Z, act, o)
+        wo = wd if o == order else lineshape_report(
+            ro, cfg["f_MHz"], nat_Hz=cfg["nat"])[2]
+        by_order.append((o, float(ro.std()) * 1000, wo["fwhm"], wo["w055"]))
+    return dict(rep=rep, res=res, raw=raw, nu=nu, sp=sp, wd=wd,
+                n=n, z0=z0, z1=z1, r=r, by_order=by_order)
+
+
+# ----------------------------------------------------------- self check
+
+def self_check(V=0.25):
+    """Solve a case with an exact answer on the same solver and voxel:
+    a uniform sphere (radius 3 mm, chi = 1 ppm) in empty space.
+    Exact: zero field change inside (with the Lorentz correction), and
+    outside a dipole, (chi/3)(a/r)^3 (3cos²θ - 1).
+    Returns the worst errors, as a fraction of the largest exact value."""
+    a, chi0, half = 3.0, 1.0, 9.0
+    x = np.arange(-half + V/2, half, V)
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij", sparse=True)
+    s = 4
+    offs = ((np.arange(s) + 0.5) / s - 0.5) * V
+    f = np.zeros((x.size,) * 3, np.float32)
+    for ox in offs:                       # partial-volume sphere
+        for oy in offs:
+            for oz in offs:
+                f += ((X+ox)**2 + (Y+oy)**2 + (Z+oz)**2) <= a*a
+    f /= s**3
+    dB = field_fast(f * chi0, V).astype(float)
+    R = np.sqrt(X**2 + Y**2 + Z**2)
+    R = np.broadcast_to(R, dB.shape)
+    Zb = np.broadcast_to(Z, dB.shape)
+    exact = np.where(R > a, chi0/3 * (a/np.maximum(R, 1e-9))**3
+                     * (3*(Zb/np.maximum(R, 1e-9))**2 - 1), 0.0)
+    scale = 2 * chi0 / 3                  # largest exact value (on the pole)
+    inside = R < a - 0.8
+    outside = (R > a + 0.8) & (R < 2*a)
+    return dict(inside=float(np.abs(dB[inside] - dB[inside].mean()).max()
+                             / scale),
+                outside=float(np.abs((dB - dB[inside].mean() - exact)
+                                     [outside]).max() / scale),
+                voxel=V, n=int(x.size))
+
+
+# ----------------------------------------------------- measured spectra
+
+def parse_spectrum(text, unit="Hz", f_MHz=500.0):
+    """Two columns of numbers (frequency, intensity) from a text or CSV
+    file, any separator, header lines ignored. Returns frequency in Hz
+    centred on the tallest point and intensity scaled to 1, baseline (the
+    outer 5 % at each end) removed. None if it cannot be read."""
+    rows = []
+    for line in text.splitlines():
+        for ch in ",;\t":
+            line = line.replace(ch, " ")
+        parts = line.split()
+        try:
+            rows.append((float(parts[0]), float(parts[1])))
+        except (ValueError, IndexError):
+            continue
+    if len(rows) < 8:
+        return None
+    a = np.array(rows)
+    a = a[np.argsort(a[:, 0])]
+    nu, y = a[:, 0], a[:, 1]
+    if unit == "ppm":
+        nu = nu * f_MHz
+    k = max(2, len(y) // 20)
+    y = y - np.median(np.r_[y[:k], y[-k:]])
+    if y.max() <= 0:
+        return None
+    y = y / y.max()
+    nu = nu - nu[int(np.argmax(y))]
+    # width at half height, by walking out from the peak
+    i = int(np.argmax(y)); l = i; r = i
+    while l > 0 and y[l] > 0.5:
+        l -= 1
+    while r < len(y) - 1 and y[r] > 0.5:
+        r += 1
+    def cross(i0, i1):
+        if y[i0] == y[i1]:
+            return nu[i0]
+        return nu[i0] + (0.5 - y[i0]) * (nu[i1] - nu[i0]) / (y[i1] - y[i0])
+    fwhm = cross(r - 1, r) - cross(l, l + 1) if r > l + 1 else np.nan
+    return dict(nu=nu, y=y, fwhm=float(fwhm))
