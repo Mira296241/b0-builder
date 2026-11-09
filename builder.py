@@ -1318,8 +1318,8 @@ CAD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "frascan_cad.npz")
 CAD_TIP = 1.0        # height of the tube tip above the waveguide in the CAD
 CAD_COL = {"copper parts": ("#c0703a", 1.0), "brass parts": ("#b59a3c", 1.0),
-           "PEEK parts": ("#d8cfa6", 1.0), "lid (SLA resin)": ("#c9c9d4", 1.0),
-           "glass former": ("#bcd3e6", 0.35),
+           "PEEK parts": ("#d8cfa6", 0.9), "lid (SLA resin)": ("#c9c9d4", 0.12),
+           "glass former": ("#bcd3e6", 0.3),
            "chip capacitors": ("#6b5b95", 1.0)}
 
 

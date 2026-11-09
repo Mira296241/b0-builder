@@ -48,8 +48,10 @@ SOURCES.setdefault("SLA resin", ("estimate", "acrylate photopolymer, taken "
                    "close to PMMA; not measured"))
 MATERIALS_PPM.setdefault("ceramic (chip capacitor)", -18.0)
 SOURCES.setdefault("ceramic (chip capacitor)", (
-    "estimate", "taken as alumina. The real value depends on the dielectric "
-    "and the terminations and is NOT known: measure or ask the maker"))
+    "estimate", "GUESS, taken as alumina. What matters is the dielectric and "
+    "the metal terminations, not the capacitance. Between -30 and 0 ppm the "
+    "predicted FRASCAN II line moves from 61 to 19 Hz, so ask the maker or "
+    "measure with and without them."))
 
 MATCHED = "matched to the sample"
 
@@ -195,7 +197,7 @@ def _box(name, mat, cx, cy, sx, sy, z0, z1):
 
 
 _SP, _LID = "modulation coil spool (PEEK)", "lid (SLA resin)"
-_CAP = "chip capacitor (χ unknown)"
+_CAP = "chip capacitors (χ unknown)"
 # Parts of the probe head that are not one of the standard parts above.
 # Bodies of revolution are cut into rings; heights in the probe frame.
 FRASCAN_PARTS = [
@@ -208,9 +210,11 @@ FRASCAN_PARTS = [
     _ring(_SP, "PEEK", 6.5, 12.6, 34.24, 37.24),
     _ring(_SP, "PEEK", 5.0, 12.6, 37.24, 37.95),
     _ring(_SP, "PEEK", 5.0, 9.0, 37.95, 46.75),
-    _ring(_LID, "SLA resin", 9.35, 17.93, 37.95, 55.25),
-    _ring(_LID, "SLA resin", 4.5, 9.35, 46.8, 51.2),
-    _ring(_LID, "SLA resin", 2.7, 9.35, 51.2, 55.5),
+    # The lid sits 15 mm above the detected sample and changes the line by
+    # 0.3 Hz out of 19, so it is off by default. Switch it on to check.
+    dict(_ring(_LID, "SLA resin", 9.35, 17.93, 37.95, 55.25), on=False),
+    dict(_ring(_LID, "SLA resin", 4.5, 9.35, 46.8, 51.2), on=False),
+    dict(_ring(_LID, "SLA resin", 2.7, 9.35, 51.2, 55.5), on=False),
     _ring("electronics support (PEEK)", "PEEK", 10.05, 17.93, -3.25, -0.75),
     dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, 6.09, 3.0, 2.02, 4.98, 7.5), on=False),
     dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, -6.09, 3.0, 2.02, 4.98, 7.5), on=False),

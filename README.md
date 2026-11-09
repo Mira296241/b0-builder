@@ -53,11 +53,11 @@ The FRASCAN II preset is now read from the STEP export of the Fusion assembly (N
 - **Corrected**: tube 4.98 mm OD with 0.39 mm wall (was 0.5), tube tip 1.0 mm above the waveguide (was 0.5), 34 mm of sample (was 45), coil windows 90° wide facing ±y (was 88°).
 - **Added, they were missing**: the borosilicate glass former under the RF coil, the coil ground ring, the PEEK modulation coil spool, the SLA lid, the PEEK electronics support, and the two chip capacitors at the coil slits.
 - **Extra parts panel**: parts have names, parts with the same name are switched on and off together ("included in the calculation"), and you pick one to edit.
-- **The capacitors are OFF by default.** Their susceptibility is not known (entered as alumina, an estimate). Switched on they dominate the result, so find out their real value before trusting either number.
+- **Two parts are listed but OFF by default.** The *lid*, because it sits 15 mm above the detected sample and moves the line by 0.3 Hz out of 19, so it is only there to show that it does not matter. The *chip capacitors*, because their susceptibility is not known: between -30 and 0 ppm the predicted line moves from 61 to 19 Hz. The capacitance (3 pF) is irrelevant; the dielectric and the terminations are what count.
 - **Preview**: choose the cut plane, through x or through y (the windows face y).
 - **3D view**: if `frascan_cad.npz` is in the folder, the FRASCAN II preset can show the real CAD of the probe head. Delete that file to keep the design out of a public copy; everything else works without it.
 
-Predicted FWHM for the preset (toluene, 500 MHz, 0.5 Hz baseline), capacitors off: 19 Hz at 2nd order shimming, 8.9 Hz at 3rd, 1.2 Hz at 4th.
+Predicted FWHM for the preset (toluene, 500 MHz, 0.5 Hz baseline), lid and capacitors off: 19 Hz at 2nd order shimming, 8.9 Hz at 3rd, 1.2 Hz at 4th.
 
 What the tool still cannot know: the magnet's own inhomogeneity and how well the shims were actually set. It predicts what the probe and sample ADD, assuming ideal shimming up to the chosen order.
 
