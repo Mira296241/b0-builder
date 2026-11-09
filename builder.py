@@ -4,8 +4,8 @@ B0 builder: the simple version of the B0 tool.
 Start from a preset, add only the parts your probe has, press Run.
 Run with:   python -m streamlit run builder.py
 
-The full version with sweeps, recommendations, microwave models and
-susceptibility matching is app.py. Both use the same physics (b0core.py).
+The full version with recommendations, microwave models and susceptibility
+matching is app.py. Both use the same physics (b0core.py).
 """
 import io
 import json
@@ -20,6 +20,16 @@ import builder_core as C
 from b0core import MATERIALS_PPM, SOURCES
 import plotting as P
 
+try:
+    import plotly.graph_objects as go
+except Exception:                                  # 3D view is optional
+    go = None
+
+# ------------------------------------------------ edit before sharing
+FEEDBACK_URL = "https://github.com/Mira296241/b0-builder/issues"
+AUTHOR = ""      # e.g. "Name, group, institute". Shown on the About page.
+CITE = ""        # how to cite the tool. Shown on the About page when set.
+
 P.use_style()
 st.set_page_config(page_title="B0 builder", layout="wide")
 
@@ -29,13 +39,24 @@ st.set_page_config(page_title="B0 builder", layout="wide")
 # (Streamlit forgets the value of a widget that is not on screen) and when
 # you switch between editing A and B. Widget keys carry the setup letter.
 ss = st.session_state
+FIRST = "Blank (tube only)"
 if "cfg" not in ss:
     ss.cfg = {"A": dict(C.BLANK), "B": dict(C.BLANK)}
     ss.cust = {"A": [], "B": []}
-    ss.preset = {"A": "Blank (tube only)", "B": "Blank (tube only)"}
+    ss.preset = {"A": FIRST, "B": FIRST}
     ss.solved = {}
     ss.edit = "A"
     ss.auto_run = True
+    code = st.query_params.get("s")
+    if code:                                   # opened from a share link
+        try:
+            c0, cu = C.decode_setup(code)
+            ss.cfg["A"] = c0
+            ss.cust["A"] = [dict(p, id=uuid.uuid4().hex[:8]) for p in cu]
+            ss.preset["A"] = None
+            ss.from_link = True
+        except Exception:
+            ss.link_error = True
 AB = bool(ss.get("ab_on", False))
 if not AB:
     ss.edit = "A"
@@ -44,15 +65,18 @@ S = ss.cfg[E]
 WK = f"w{E}_"                       # widget-key prefix for this setup
 ABCOL = {"A": "#2f6fb5", "B": "#d9822b"}
 
-BASE_MATS = [m for m in MATERIALS_PPM if not m.startswith("custom")]
-SOLIDS = [m for m in BASE_MATS if m not in ("air", "vacuum",
-    "water", "D2O", "toluene", "toluene-d8", "DMSO", "chloroform-d",
-    "acetone-d6", "acetonitrile-d3", "benzene-d6", "methanol-d4", "THF-d8",
-    "methanol", "ethanol", "glycerol/water 60:40")]
-LIQUIDS = [m for m in BASE_MATS if m not in SOLIDS + ["air", "vacuum"]]
+LIQ_NAMES = ("water", "D2O", "toluene", "toluene-d8", "DMSO", "chloroform-d",
+             "acetone-d6", "acetonitrile-d3", "benzene-d6", "methanol-d4",
+             "THF-d8", "methanol", "ethanol", "glycerol/water 60:40")
+BASE_MATS = [m for m in MATERIALS_PPM
+             if not m.startswith(("custom", "__"))]
+SOLIDS = [m for m in BASE_MATS if m not in ("air", "vacuum") + LIQ_NAMES]
+LIQUIDS = [m for m in BASE_MATS if m in LIQ_NAMES]
 
 
 def mat_label(m):
+    if m == C.MATCHED:
+        return "matched to the sample"
     if m.startswith("custom"):
         return "custom χ…"
     return f"{m}  ({MATERIALS_PPM[m]:+.2f} ppm)"
@@ -70,7 +94,9 @@ def _forget_widgets(e):
 
 def apply_preset():
     e = ss.edit
-    name = ss[f"preset_pick_{e}"]
+    name = ss.get(f"preset_pick_{e}")
+    if not name:
+        return
     _forget_widgets(e)
     ss.preset[e] = name
     ss.cfg[e] = dict(C.PRESETS[name][0])
@@ -83,6 +109,7 @@ def copy_setup(src, dst):
     ss.cfg[dst] = dict(ss.cfg[src])
     ss.cust[dst] = [dict(p, id=uuid.uuid4().hex[:8]) for p in ss.cust[src]]
     ss.preset[dst] = ss.preset[src]
+    ss.pop(f"preset_pick_{dst}", None)
     ss.auto_run = True
 
 
@@ -110,7 +137,7 @@ def mat(label, key, options, help=None):
 
 
 def source_note(m):
-    if m.startswith("custom"):
+    if m.startswith("custom") or m == C.MATCHED:
         return
     kind, src = SOURCES.get(m, ("?", ""))
     st.caption(f"χ = {MATERIALS_PPM[m]:+.2f} ppm · {kind}. {src}")
@@ -132,6 +159,11 @@ sb = st.sidebar
 sb.title("B₀ builder")
 sb.caption("Build your probe one part at a time and see how it disturbs "
            "the magnetic field in your sample.")
+if ss.pop("from_link", False):
+    sb.success("Loaded the setup from the link.")
+if ss.pop("link_error", False):
+    sb.error("That link could not be read. Starting from a blank setup.")
+
 
 def _ab_changed():
     if ss.ab_on and not ss.get("b_init"):
@@ -154,14 +186,18 @@ if AB:
     sb.divider()
 
 names = list(C.PRESETS)
-sb.radio("Start from" + (f" (setup {E})" if AB else ""), names,
-         index=names.index(ss.preset[E]),
-         key=f"preset_pick_{E}", on_change=apply_preset,
-         help="Loads a complete setup. You can change anything afterwards.")
-sb.caption(C.PRESETS[ss.preset[E]][1])
+cur = ss.preset[E]
+sb.selectbox("Start from" + (f" (setup {E})" if AB else ""), names,
+             index=names.index(cur) if cur in names else None,
+             key=f"preset_pick_{E}", on_change=apply_preset,
+             placeholder="a loaded setup",
+             help="Loads a complete setup. You can change anything "
+                  "afterwards.")
+if cur in C.PRESETS:
+    sb.caption(C.PRESETS[cur][1])
 
 sb.divider()
-sb.subheader("Save / load")
+sb.subheader("Save, load, share")
 sb.download_button("Save this setup (.json)" if not AB
                    else f"Save setup {E} (.json)",
                    json.dumps(cfg_now(), indent=1),
@@ -172,23 +208,35 @@ up = sb.file_uploader("Load a setup" + (f" into {E}" if AB else ""),
                       help="A file saved with the button above.")
 if up is not None and ss.get("loaded_id") != up.file_id:
     try:
-        d = json.loads(up.getvalue())
-        new = dict(C.BLANK)
-        for k, v in d.items():
-            if k in C.BLANK:
-                d0 = C.BLANK[k]
-                new[k] = (float(v) if isinstance(d0, float) else
-                          int(v) if isinstance(d0, int) and
-                          not isinstance(d0, bool) else v)
+        new, cu = C.coerce(json.loads(up.getvalue()))
         _forget_widgets(E)
         ss.cfg[E] = new
-        ss.cust[E] = [dict(C.CUSTOM_DEFAULT, **p, id=uuid.uuid4().hex[:8])
-                      for p in d.get("custom", [])]
+        ss.cust[E] = [dict(p, id=uuid.uuid4().hex[:8]) for p in cu]
+        ss.preset[E] = None
+        ss.pop(f"preset_pick_{E}", None)
         ss.loaded_id = up.file_id
         ss.auto_run = True
         st.rerun()
     except Exception as e:
         sb.error(f"Could not read that file: {e}")
+
+if sb.button("Create a link to this setup", width="stretch",
+             help="Packs the whole setup into a web address. Whoever opens "
+                  "it sees exactly this probe."):
+    ss.link_code = C.encode_setup(cfg_now())
+    st.query_params["s"] = ss.link_code
+if ss.get("link_code"):
+    base = None
+    try:
+        base = str(st.context.url).split("?")[0]
+    except Exception:
+        pass
+    if base and "localhost" not in base:
+        sb.code(f"{base}?s={ss.link_code}", language=None)
+        sb.caption("Copy this link and send it.")
+    else:
+        sb.caption("Done: the address bar of your browser now holds this "
+                   "setup. Copy the address from there and send it.")
 
 sb.divider()
 with sb.expander("Accuracy (advanced)" + (f", setup {E}" if AB else "")):
@@ -206,14 +254,34 @@ with sb.expander("Accuracy (advanced)" + (f", setup {E}" if AB else "")):
                    f"flat to **{chk['inside']*100:.1f} %**, dipole field "
                    f"outside right to **{chk['outside']*100:.1f} %** of the "
                    "largest exact value.")
-sb.caption("Need sweeps, recommendations or the microwave models? "
-           "Run the full app: `python -m streamlit run app.py`")
+if FEEDBACK_URL:
+    sb.link_button("Report a problem or suggest something", FEEDBACK_URL,
+                   width="stretch")
 
 
 # ----------------------------------------------------------------- layout
 left, right = st.columns([1.0, 1.45], gap="large")
 
 with left:
+    if not ss.get("tour_done"):
+        with st.expander("New here? A 30-second tour", expanded=True):
+            st.markdown(
+                "1. **Start from** a preset in the sidebar, for example "
+                "*Standard 5 mm tube*.\n"
+                "2. Set your **sample tube** below, then switch on the "
+                "**probe parts** your probe has.\n"
+                "3. The **preview** on the right redraws as you type. Press "
+                "**Run** to compute the field.\n"
+                "4. Read the **linewidth** and the simulated NMR line. "
+                "*More results* shows how it depends on shimming.\n"
+                "5. Try the other tabs: **Sweep** one parameter, look at "
+                "the probe in **3D**, or read **About** for the method.\n"
+                "6. Want to compare two versions? Switch on **Compare two "
+                "setups** in the sidebar.")
+            if st.button("Got it, hide this"):
+                ss.tour_done = True
+                st.rerun()
+
     if AB:
         st.markdown(f"<h3 style='margin-bottom:0'>Setup <span style='color:"
                     f"{ABCOL[E]}'>{E}</span></h3>", unsafe_allow_html=True)
@@ -221,7 +289,7 @@ with left:
     else:
         st.subheader("Your probe")
     st.caption("All heights in mm, measured from **z = 0**, the probe "
-               "reference (the waveguide top, if you add one).")
+               "reference (the waveguide top, unless you move it).")
 
     # ---------------------------------------------------------- tube
     with st.expander("Sample tube", expanded=True):
@@ -230,7 +298,7 @@ with left:
             num("outer diameter", "t_OD", 1.0, 12.0, 0.1,
                 help="Outside diameter of the tube (mm).")
             num("liquid column", "t_fill", 2.0, 80.0, 1.0,
-                help="Height of the liquid, from the inner bottom (mm).")
+                help="Height of the liquid (mm).")
         with b:
             num("wall thickness", "t_wall", 0.05, 2.0, 0.05,
                 help="Glass wall thickness (mm).")
@@ -247,6 +315,19 @@ with left:
             num("sample χ (ppm)", "t_liquid_chi", -60.0, 60.0, 0.1)
         else:
             source_note(l)
+            T = num("sample temperature (°C)", "t_temp", -20.0, 100.0, 5.0,
+                    help="Liquids expand when they warm up, so their "
+                         "susceptibility changes (about 0.1 ppm per 10 °C "
+                         "for organic solvents). Measured slopes from "
+                         "Hoffman 2022, valid for the liquid between 0 and "
+                         "70 °C. For a frozen sample use 'custom χ'.")
+            if T != C.T_REF:
+                note = f"χ at {T:g} °C = **{C.chi_sample(S):+.2f} ppm**"
+                if l in C.TEMP_ESTIMATED:
+                    note += " (estimated slope)"
+                if not 0 <= T <= 70:
+                    note += ". Outside 0 to 70 °C this is an extrapolation"
+                st.caption(note + ".")
         if st.toggle("more tube options", key="adv_tube"):
             W(st.radio, "bottom shape", "t_bottom",
               options=["round", "flat", "punt"], horizontal=True,
@@ -266,6 +347,31 @@ with left:
 
     st.markdown("**Probe parts**")
     st.caption("Switch on only what your probe has.")
+
+    # ----------------------------------------------------------- plugs
+    if W(st.toggle, "Susceptibility plugs", "p_on",
+         help="Solid plugs inside the tube, below and above the sample, "
+              "as in a Shigemi tube. Matched to the sample they hide its "
+              "two ends from the coil, so a short sample behaves like a "
+              "long one."):
+        with st.expander("Plug settings", expanded=False):
+            W(st.checkbox, "plug below the sample", "p_bot")
+            if S["p_bot"]:
+                a, b = st.columns(2)
+                with a:
+                    num("length", "p_bot_len", 0.5, 40.0, 0.5,
+                        help="The sample sits on top of it.")
+                with b:
+                    mat("material", "p_bot_mat", [C.MATCHED] + SOLIDS)
+            W(st.checkbox, "plunger above the sample", "p_top")
+            if S["p_top"]:
+                a, b = st.columns(2)
+                with a:
+                    num("length ", "p_top_len", 0.5, 40.0, 0.5)
+                with b:
+                    mat("material ", "p_top_mat", [C.MATCHED] + SOLIDS)
+            st.caption("PMMA (acrylic) is the plastic closest to water. "
+                       "'Matched' means exactly the sample's value.")
 
     # ------------------------------------------------------------ coil
     if W(st.toggle, "RF coil", "c_on",
@@ -299,7 +405,8 @@ with left:
 
     # ------------------------------------------------------- waveguide
     if W(st.toggle, "Waveguide", "w_on",
-         help="A metal waveguide below the tube, its top at z = 0."):
+         help="A metal waveguide below the tube. Its top is at z = 0 "
+              "unless you move it."):
         with st.expander("Waveguide settings", expanded=False):
             a, b = st.columns(2)
             with a:
@@ -308,6 +415,10 @@ with left:
                     help="Only its top end matters. 20 mm is plenty.")
             with b:
                 num("wall", "w_wall", 0.1, 5.0, 0.05)
+                num("top height", "w_top", -40.0, 20.0, 0.5,
+                    help="0 = at the probe reference. A negative value "
+                         "lowers the waveguide away from the sample, "
+                         "without moving anything else.")
             mat("metal", "w_mat", SOLIDS,
                 help="Brass is an estimate. Measure it if it matters.")
 
@@ -426,6 +537,17 @@ with left:
         if not manual:
             z0, z1 = C.coil_window(S)
             st.caption(f"From the coil: **{z0:.1f} to {z1:.1f} mm**.")
+        W(st.checkbox, "smooth coil edges (more realistic)", "d_soft",
+          help="A real coil does not stop seeing the sample at a sharp "
+               "line: its sensitivity fades out beyond the window. With "
+               "this on, the sample is weighted by a simple coil profile "
+               "(flat inside the window, fading over the edge width "
+               "outside) instead of a sharp-edged box. Shimming then also "
+               "optimises the weighted signal.")
+        if S["d_soft"]:
+            num("edge width (mm)", "d_edge", 0.2, 10.0, 0.1,
+                help="How far beyond the window the coil still sees "
+                     "sample. About half the coil radius is typical.")
         W(st.select_slider, "shimming, up to", "sh_order",
           options=[0, 1, 2, 3, 4], format_func=lambda o: C.SHIM_LABELS[o],
           help="Which correction coils the spectrometer uses to flatten "
@@ -435,7 +557,13 @@ with left:
                "pessimistic.")
         a, b = st.columns(2)
         with a:
-            num("¹H frequency (MHz)", "f_MHz", 10.0, 1500.0, 10.0)
+            num("magnet: ¹H frequency (MHz)", "f_MHz", 10.0, 1500.0, 10.0,
+                help="The size of the magnet, quoted the usual way.")
+            W(st.selectbox, "observed nucleus", "nuc",
+              options=list(C.NUCLEI), format_func=lambda n: C.NUC_LABEL[n],
+              help="Linewidths in Hz scale with the nucleus frequency: the "
+                   "same field error gives a 4 times narrower ¹³C line "
+                   "than ¹H.")
         with b:
             num("linewidth without the probe (Hz)", "nat", 0.05, 100.0, 0.05,
                 help="The width you would get if this probe disturbed "
@@ -444,6 +572,8 @@ with left:
                      "the linewidth measured on the same magnet and sample "
                      "with a good commercial probe. The tool adds this "
                      "probe's broadening on top.")
+            st.caption(f"{C.NUC_LABEL[S['nuc']]} at "
+                       f"**{C.f_obs(S):.1f} MHz**")
     with st.expander("Compare with a measured spectrum", expanded=False):
         st.caption("Upload a spectrum as two columns (frequency, "
                    "intensity), .csv or .txt. It is centred on its tallest "
@@ -457,7 +587,7 @@ with left:
             try:
                 ss.meas = C.parse_spectrum(
                     mf.getvalue().decode("utf-8", "replace"), unit=mu,
-                    f_MHz=float(S["f_MHz"]))
+                    f_MHz=C.f_obs(S))
             except Exception:
                 ss.meas = None
             if ss.meas is None:
@@ -467,21 +597,27 @@ with left:
                            f"**{ss.meas['fwhm']:.1f} Hz**.")
 
 
-# ---------------------------------------------------------------- preview
+# ------------------------------------------------------------- figures
 COLORS = {"glass": "#9aa7b8", "sample": "#f0b05a", "RF coil": "#c0703a",
           "waveguide": "#b59a3c", "shield": "#7f8c9b",
-          "modulation coil": "#a0522d", "custom": "#5aa58a"}
+          "modulation coil": "#a0522d", "custom": "#5aa58a",
+          "plug": "#b9a3dd"}
 
 
 def preview_frame(cfg):
     """(half-width, z_lo, z_hi) of the preview picture for one setup."""
     r, zlo, zhi = C.extent(cfg)
-    zhi = cfg["t_tip"] + cfg["t_wall"] + cfg["t_fill"] + 3.0
+    zhi = C.liquid_span(cfg)[1] + 3.0
+    if cfg["p_on"] and cfg["p_top"]:
+        zhi += cfg["p_top_len"]
     for kind, p, _ in C._parts(cfg):
         zhi = max(zhi, p["z1"] + 1.0)
     if cfg["c_on"]:
         zhi = max(zhi, cfg["c_zc"] + cfg["c_len"]/2 + 1.0)
-    zlo = max(zlo - 1.0, cfg["t_tip"] - 8.0) if cfg["w_on"] else zlo - 1.0
+    if cfg["w_on"]:
+        zlo = max(zlo - 1.0, min(cfg["t_tip"], cfg["w_top"]) - 8.0)
+    else:
+        zlo = zlo - 1.0
     return max(min(r + 1.0, 22.0), 6.0), zlo, zhi
 
 
@@ -496,8 +632,8 @@ def preview(cfg, det, compact=False, frame=None):
     _, masks = C.build_all(cfg, x, np.array([0.0]), z)
     img = np.ones((len(z), len(x), 3)) * np.array(mpl.colors.to_rgb("#f3f5f8"))
     shown = []
-    for name in ["glass", "sample", "waveguide", "modulation coil", "shield",
-                 "custom", "RF coil"]:
+    for name in ["glass", "sample", "plug", "waveguide", "modulation coil",
+                 "shield", "custom", "RF coil"]:
         if name in masks:
             m = masks[name][:, 0, :].T
             if m.any():
@@ -527,19 +663,30 @@ def preview(cfg, det, compact=False, frame=None):
     return fig
 
 
-def show(fig, tight=False):
-    """Draw a figure as an image (more robust than st.pyplot across
-    Python versions)."""
+def fig_bytes(fig, fmt="png", tight=False):
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=170,
+    fig.savefig(buf, format=fmt, dpi=170,
                 bbox_inches="tight" if tight else None)
+    return buf.getvalue()
+
+
+def show(fig, tight=False, pdf=False):
+    """Draw a figure as an image (more robust than st.pyplot across Python
+    versions). Returns (png, pdf) bytes for the download buttons."""
+    png = fig_bytes(fig, "png", tight)
+    out = (png, fig_bytes(fig, "pdf", tight) if pdf else None)
     plt.close(fig)
-    st.image(buf, width="stretch")
+    st.image(png, width="stretch")
+    return out
 
 
 @st.cache_resource(max_entries=4, show_spinner=False)
 def solve_cached(sig):
     return C.solve(json.loads(sig))
+
+
+def fmt(v, f):
+    return f.format(v) if v is not None and np.isfinite(v) else "n/a"
 
 
 def draw_measured(ax):
@@ -571,31 +718,37 @@ def order_table(an, scfg):
                "between the 2nd and 4th order rows.")
 
 
-def results_figure(sol, an, cfg):
+def field_map(ax, sol, an, scfg, lim):
     x, z, j = sol["x"], sol["z"], sol["j"]
-    dB, liq = sol["dB"], sol["liq"]
-    ref = float(an["raw"].mean())
-    v = np.abs(an["raw"] - ref)
-    lim = max(1e-4, np.percentile(v, 99) * 1.4)
+    d = np.where(sol["liq"], sol["dB"] - an["raw"].mean(), np.nan)[:, j, :]
+    m = ax.imshow(d.T, origin="lower", aspect="auto", cmap=P.FIELD_CMAP,
+                  vmin=-lim, vmax=lim, interpolation="bilinear",
+                  extent=[x[0], x[-1], z[0], z[-1]])
+    ax.add_patch(plt.Rectangle((-an["r"], an["z0"]), 2*an["r"],
+                               an["z1"] - an["z0"], fill=False, ec=P.INK,
+                               lw=1.3, ls=(0, (4, 3))))
+    ri = scfg["t_OD"] / 2 + 0.5
+    zl0, zl1 = C.liquid_span(scfg)
+    ax.set_xlim(-ri, ri)
+    ax.set_ylim(zl0 - scfg["t_wall"] - 1.0, zl1 + 1.0)
+    ax.set_xlabel("x  (mm)")
+    ax.set_ylabel("height  (mm)")
+    return m
+
+
+def map_limit(an):
+    v = np.abs(an["raw"] - an["raw"].mean())
+    return max(1e-4, np.percentile(v, 99) * 1.4)
+
+
+def results_figure(sol, an, cfg):
     fig, ax = plt.subplots(1, 2, figsize=(7.4, 3.7),
                            gridspec_kw={"width_ratios": [0.9, 1.5]})
-    d = np.where(liq, dB - ref, np.nan)[:, j, :]
-    zl = (cfg["t_tip"] - 1.0, cfg["t_tip"] + cfg["t_wall"] + cfg["t_fill"] + 1)
-    ri = cfg["t_OD"] / 2 + 0.5
-    m = ax[0].imshow(d.T, origin="lower", aspect="auto", cmap=P.FIELD_CMAP,
-                     vmin=-lim, vmax=lim, interpolation="bilinear",
-                     extent=[x[0], x[-1], z[0], z[-1]])
-    ax[0].add_patch(plt.Rectangle((-an["r"], an["z0"]), 2*an["r"],
-                                  an["z1"] - an["z0"], fill=False, ec=P.INK,
-                                  lw=1.4, ls=(0, (4, 3))))
-    ax[0].set_xlim(-ri, ri)
-    ax[0].set_ylim(*zl)
+    m = field_map(ax[0], sol, an, cfg, map_limit(an))
     cb = fig.colorbar(m, ax=ax[0], fraction=0.08, pad=0.04)
     cb.outline.set_visible(False)
     cb.set_label("field change  (ppm)", color=P.MUTED, fontsize=9)
     ax[0].set_title("field in the sample\n(before shimming)")
-    ax[0].set_xlabel("x  (mm)")
-    ax[0].set_ylabel("height  (mm)")
 
     nu, sp, wd = an["nu"], an["sp"], an["wd"]
     pk = nu[int(np.argmax(sp))]
@@ -625,91 +778,13 @@ def results_figure(sol, an, cfg):
     ax[1].set_ylim(0, 1.08)
     ax[1].set_xlabel("frequency offset  (Hz)")
     ax[1].set_ylabel("signal")
-    ax[1].set_title("the NMR line you would measure")
+    ax[1].set_title(f"the {C.NUC_LABEL[cfg['nuc']]} NMR line you would "
+                    "measure")
     ax[1].legend(frameon=False, fontsize=8.5, loc="upper left")
     ax[1].grid(color=P.GRID, lw=0.8)
     ax[1].set_axisbelow(True)
     fig.tight_layout(w_pad=2.5)
     return fig
-
-
-GEOM_SKIP = ("d_auto", "d_r", "d_z0", "d_z1", "sh_order", "f_MHz", "nat")
-SETUPS = ["A", "B"] if AB else ["A"]
-
-
-def result_for(e):
-    """(sol, an, scfg, stale) for setup e, or None if it was never run.
-    Detection, shimming and frequency are cheap, so the live values are
-    always used; only geometry changes need a new Run."""
-    if e not in ss.solved:
-        return None
-    cfg = cfg_of(e)
-    sig = ss.solved[e]
-    old = json.loads(sig)
-    scfg = dict(old)
-    for k in GEOM_SKIP:
-        scfg[k] = cfg[k]
-    sol = solve_cached(sig)
-    stale = any(old.get(k) != cfg.get(k) for k in cfg if k not in GEOM_SKIP)
-    return sol, C.analyse(sol, scfg), scfg, stale
-
-
-def fmt(v, f):
-    return f.format(v) if v is not None and np.isfinite(v) else "n/a"
-
-
-def numbers(an, scfg):
-    wd, rep = an["wd"], an["rep"]
-    return {
-        "linewidth (FWHM)": (wd["fwhm"], "{:.1f} Hz"),
-        "added by the field": (wd["fwhm"] - scfg["nat"], "{:+.1f} Hz"),
-        "field spread after shimming": (rep["shim_ppm_rms"] * 1000,
-                                        "{:.1f} ppb"),
-        "spread before shimming": (rep["raw_ppm_pp"], "{:.3f} ppm"),
-        "width at 0.55 %": (wd["w055"], "{:.1f} Hz"),
-        "width at 0.11 %": (wd["w011"], "{:.1f} Hz"),
-    }
-
-
-def single_results(sol, an, scfg):
-    wd, rep = an["wd"], an["rep"]
-    nat = scfg["nat"]
-    k = st.columns(3)
-    k[0].metric("linewidth (FWHM)", fmt(wd["fwhm"], "{:.1f} Hz"),
-                help="Full width at half maximum of the simulated line.")
-    k[1].metric("added by the field", fmt(wd["fwhm"] - nat, "{:+.1f} Hz"),
-                help="How much wider the line is than in a perfect magnet.")
-    k[2].metric("field spread after shimming",
-                f"{rep['shim_ppm_rms']*1000:.1f} ppb",
-                help="rms of the leftover field over the detected region. "
-                     "1 ppb = 0.001 ppm.")
-    show(results_figure(sol, an, scfg))
-    with st.expander("More results"):
-        order_table(an, scfg)
-        t = st.columns(4)
-        t[0].metric("before shimming", f"{rep['raw_ppm_pp']*1000:.0f} ppb",
-                    help="Field spread over the detected region before "
-                         "shimming, peak to peak.")
-        t[1].metric("after shimming", f"{rep['shim_ppm_pp']*1000:.0f} ppb",
-                    help="Field spread after shimming, peak to peak.")
-        t[2].metric("width at 0.55 %", fmt(wd["w055"], "{:.1f} Hz"))
-        t[3].metric("width at 0.11 %", fmt(wd["w011"], "{:.1f} Hz"))
-        st.caption("0.55 % and 0.11 % are the standard NMR lineshape test: "
-                   "they show the broad foot of the line that the FWHM hides.")
-        f2, a2 = plt.subplots(1, 2, figsize=(7.4, 3.0))
-        P.hist_panel(a2[0], an["res"], scfg["f_MHz"])
-        a2[0].set_title("leftover field after shimming")
-        log_line(a2[1], [(an, "#2f6fb5", None)], nat)
-        f2.tight_layout(w_pad=2.5)
-        try:
-            show(f2)
-        except Exception:
-            plt.close(f2)
-            st.caption("This plot could not be drawn on this server.")
-        st.caption(f"{an['n']} voxels detected, voxel {sol['V']} mm, "
-                   f"detection {an['z0']:.1f} to {an['z1']:.1f} mm, radius "
-                   f"{an['r']:.1f} mm, shimming: "
-                   f"{C.SHIM_LABELS[int(scfg['sh_order'])]}.")
 
 
 def log_line(ax, lines, nat):
@@ -763,36 +838,168 @@ def ab_maps(R):
     """Field maps of A and B on one colour scale."""
     fig = plt.figure(figsize=(7.4, 3.6))
     gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.07], wspace=0.3)
-    lim = 1e-4
-    for e in "AB":
-        an = R[e][1]
-        v = np.abs(an["raw"] - an["raw"].mean())
-        lim = max(lim, np.percentile(v, 99) * 1.4)
+    lim = max(map_limit(R[e][1]) for e in "AB")
     for i, e in enumerate("AB"):
         sol, an, scfg, _ = R[e]
         ax = fig.add_subplot(gs[0, i])
-        x, z, j = sol["x"], sol["z"], sol["j"]
-        d = np.where(sol["liq"], sol["dB"] - an["raw"].mean(), np.nan)[:, j, :]
-        m = ax.imshow(d.T, origin="lower", aspect="auto", cmap=P.FIELD_CMAP,
-                      vmin=-lim, vmax=lim, interpolation="bilinear",
-                      extent=[x[0], x[-1], z[0], z[-1]])
-        ax.add_patch(plt.Rectangle((-an["r"], an["z0"]), 2*an["r"],
-                                   an["z1"] - an["z0"], fill=False, ec=P.INK,
-                                   lw=1.2, ls=(0, (4, 3))))
-        ri = scfg["t_OD"] / 2 + 0.5
-        ax.set_xlim(-ri, ri)
-        ax.set_ylim(scfg["t_tip"] - 1, scfg["t_tip"] + scfg["t_wall"]
-                    + scfg["t_fill"] + 1)
+        m = field_map(ax, sol, an, scfg, lim)
         ax.set_title(f"field in the sample, {e}", color=ABCOL[e],
                      fontweight="bold")
-        ax.set_xlabel("x  (mm)")
-        ax.set_ylabel("height  (mm)")
     cb = fig.colorbar(m, cax=fig.add_subplot(gs[0, 2]))
     cb.outline.set_visible(False)
     cb.set_label("field change before shimming (ppm)", color=P.MUTED,
                  fontsize=8.5)
     fig.subplots_adjust(left=0.09, right=0.9, bottom=0.14, top=0.88)
     return fig
+
+
+# ----------------------------------------------------------- downloads
+def numbers(an, scfg):
+    wd, rep = an["wd"], an["rep"]
+    return {
+        "linewidth (FWHM)": (wd["fwhm"], "{:.1f} Hz"),
+        "added by the field": (wd["fwhm"] - scfg["nat"], "{:+.1f} Hz"),
+        "field spread after shimming": (rep["shim_ppm_rms"] * 1000,
+                                        "{:.1f} ppb"),
+        "spread before shimming": (rep["raw_ppm_pp"], "{:.3f} ppm"),
+        "width at 0.55 %": (wd["w055"], "{:.1f} Hz"),
+        "width at 0.11 %": (wd["w011"], "{:.1f} Hz"),
+    }
+
+
+def numbers_csv(R):
+    """Every number on screen plus the full setup, one column per setup."""
+    es = list(R)
+    out = ["quantity," + ",".join(es)]
+
+    def row(name, vals):
+        out.append(name + "," + ",".join(str(v) for v in vals))
+
+    row("FWHM (Hz)", [f"{R[e][1]['wd']['fwhm']:.4g}" for e in es])
+    row("width at 0.55 % (Hz)", [f"{R[e][1]['wd']['w055']:.4g}" for e in es])
+    row("width at 0.11 % (Hz)", [f"{R[e][1]['wd']['w011']:.4g}" for e in es])
+    row("leftover field rms (ppb)",
+        [f"{R[e][1]['rep']['shim_ppm_rms']*1000:.4g}" for e in es])
+    row("leftover field peak to peak (ppb)",
+        [f"{R[e][1]['rep']['shim_ppm_pp']*1000:.4g}" for e in es])
+    row("spread before shimming peak to peak (ppm)",
+        [f"{R[e][1]['rep']['raw_ppm_pp']:.4g}" for e in es])
+    row("observed frequency (MHz)", [f"{R[e][1]['f']:.4f}" for e in es])
+    row("voxel (mm)", [R[e][0]["V"] for e in es])
+    row("voxels detected", [R[e][1]["n"] for e in es])
+    for o in range(5):
+        row(f"FWHM with shimming to order {o} (Hz)",
+            [f"{R[e][1]['by_order'][o][2]:.4g}" for e in es])
+        row(f"leftover rms with shimming to order {o} (ppb)",
+            [f"{R[e][1]['by_order'][o][1]:.4g}" for e in es])
+    out.append("")
+    out.append("setup parameter," + ",".join(es))
+    for k in C.BLANK:
+        row(k, [str(R[e][2][k]).replace(",", ";") for e in es])
+    for e in es:
+        for i, p in enumerate(R[e][2].get("custom", [])):
+            out.append(f"custom part {i+1} ({e}),"
+                       + json.dumps(p).replace(",", ";"))
+    return "\n".join(out)
+
+
+def line_csv(R):
+    out = ["setup,frequency_offset_Hz,signal"]
+    for e in R:
+        an = R[e][1]
+        nu, sp = an["nu"], an["sp"]
+        nu = nu - nu[int(np.argmax(sp))]
+        keep = np.where(sp > 1e-4)[0]
+        sl = slice(max(keep[0] - 5, 0), keep[-1] + 6)
+        nu, sp = nu[sl], sp[sl]
+        step = max(1, len(nu) // 3000)
+        out += [f"{e},{a:.4f},{b:.6f}" for a, b in zip(nu[::step], sp[::step])]
+    return "\n".join(out)
+
+
+def download_row(R, png, pdf, tag):
+    st.caption("Download")
+    c = st.columns(4)
+    c[0].download_button("figure (PNG)", png, "b0_result.png", "image/png",
+                         key=f"dl_png_{tag}", width="stretch")
+    c[1].download_button("figure (PDF)", pdf, "b0_result.pdf",
+                         "application/pdf", key=f"dl_pdf_{tag}",
+                         width="stretch")
+    c[2].download_button("numbers (CSV)", numbers_csv(R), "b0_numbers.csv",
+                         "text/csv", key=f"dl_num_{tag}", width="stretch",
+                         help="Every number shown, the result for each "
+                              "shim order, and the full setup.")
+    c[3].download_button("NMR line (CSV)", line_csv(R), "b0_line.csv",
+                         "text/csv", key=f"dl_line_{tag}", width="stretch",
+                         help="The simulated spectrum: frequency offset "
+                              "and signal.")
+
+
+# ------------------------------------------------------------- results
+GEOM_SKIP = ("d_auto", "d_r", "d_z0", "d_z1", "d_soft", "d_edge",
+             "sh_order", "f_MHz", "nuc", "nat")
+SETUPS = ["A", "B"] if AB else ["A"]
+
+
+def result_for(e):
+    """(sol, an, scfg, stale) for setup e, or None if it was never run.
+    Detection, shimming and frequency are cheap, so the live values are
+    always used; only geometry changes need a new Run."""
+    if e not in ss.solved:
+        return None
+    cfg = cfg_of(e)
+    sig = ss.solved[e]
+    old = json.loads(sig)
+    scfg = dict(old)
+    for k in GEOM_SKIP:
+        scfg[k] = cfg[k]
+    sol = solve_cached(sig)
+    stale = any(old.get(k) != cfg.get(k) for k in cfg if k not in GEOM_SKIP)
+    return sol, C.analyse(sol, scfg), scfg, stale
+
+
+def single_results(R):
+    sol, an, scfg, _ = R["A"]
+    wd, rep = an["wd"], an["rep"]
+    nat = scfg["nat"]
+    k = st.columns(3)
+    k[0].metric("linewidth (FWHM)", fmt(wd["fwhm"], "{:.1f} Hz"),
+                help="Full width at half maximum of the simulated line.")
+    k[1].metric("added by the field", fmt(wd["fwhm"] - nat, "{:+.1f} Hz"),
+                help="How much wider the line is than without the probe.")
+    k[2].metric("field spread after shimming",
+                f"{rep['shim_ppm_rms']*1000:.1f} ppb",
+                help="rms of the leftover field over the detected region. "
+                     "1 ppb = 0.001 ppm.")
+    png, pdf = show(results_figure(sol, an, scfg), pdf=True)
+    download_row(R, png, pdf, "one")
+    with st.expander("More results"):
+        order_table(an, scfg)
+        t = st.columns(4)
+        t[0].metric("before shimming", f"{rep['raw_ppm_pp']*1000:.0f} ppb",
+                    help="Field spread over the detected region before "
+                         "shimming, peak to peak.")
+        t[1].metric("after shimming", f"{rep['shim_ppm_pp']*1000:.0f} ppb",
+                    help="Field spread after shimming, peak to peak.")
+        t[2].metric("width at 0.55 %", fmt(wd["w055"], "{:.1f} Hz"))
+        t[3].metric("width at 0.11 %", fmt(wd["w011"], "{:.1f} Hz"))
+        st.caption("0.55 % and 0.11 % are the standard NMR lineshape test: "
+                   "they show the broad foot of the line that the FWHM hides.")
+        f2, a2 = plt.subplots(1, 2, figsize=(7.4, 3.0))
+        P.hist_panel(a2[0], an["res"], an["f"])
+        a2[0].set_title("leftover field after shimming")
+        log_line(a2[1], [(an, "#2f6fb5", None)], nat)
+        f2.tight_layout(w_pad=2.5)
+        try:
+            show(f2)
+        except Exception:
+            plt.close(f2)
+            st.caption("This plot could not be drawn on this server.")
+        st.caption(f"{an['n']} voxels detected, voxel {sol['V']} mm, "
+                   f"detection {an['z0']:.1f} to {an['z1']:.1f} mm"
+                   + (" (smooth edges)" if an["soft"] else "")
+                   + f", radius {an['r']:.1f} mm, shimming: "
+                   f"{C.SHIM_LABELS[int(scfg['sh_order'])]}.")
 
 
 def ab_results(R):
@@ -820,7 +1027,8 @@ def ab_results(R):
         df = f.replace("{:", "{:+").replace("++", "+") if "+" not in f else f
         rows.append(f"| {k} | {fmt(va, f)} | {fmt(vb, f)} | {fmt(dv, df)} |")
     st.markdown("\n".join(rows), unsafe_allow_html=True)
-    show(ab_lines(R))
+    png, pdf = show(ab_lines(R), pdf=True)
+    download_row(R, png, pdf, "ab")
     show(ab_maps(R))
     with st.expander("More results"):
         for e in "AB":
@@ -844,7 +1052,7 @@ def ab_results(R):
                        f"{C.SHIM_LABELS[int(scfg['sh_order'])]}.")
 
 
-with right:
+def tab_result():
     st.subheader("Preview")
     pcols = st.columns(len(SETUPS))
     frame = None
@@ -871,16 +1079,26 @@ with right:
                          "tube, a few seconds for a full probe.")
     if run or ss.get("auto_run"):
         ss.auto_run = False
-        with st.spinner("computing the field…"):
-            for e in SETUPS:
-                sig = json.dumps(cfg_of(e), sort_keys=True)
-                ss.solved[e] = sig
-                solve_cached(sig)
+        if run:
+            ss.tour_done = True
+        try:
+            with st.spinner("computing the field…"):
+                for e in SETUPS:
+                    sig = json.dumps(cfg_of(e), sort_keys=True)
+                    solve_cached(sig)
+                    ss.solved[e] = sig
+        except Exception as ex:
+            st.error(f"This setup could not be computed: {ex}")
+            return
 
-    R = {e: result_for(e) for e in SETUPS}
+    try:
+        R = {e: result_for(e) for e in SETUPS}
+    except Exception as ex:
+        st.error(f"The result could not be analysed: {ex}")
+        return
     if any(r is None for r in R.values()):
         st.info("Press **Run** to compute the field.")
-        st.stop()
+        return
     stale = [e for e in SETUPS if R[e][3]]
     if stale:
         who = "the probe" if not AB else "setup " + " and ".join(stale)
@@ -896,8 +1114,396 @@ with right:
                   + (f" (setup {', '.join(bad)})" if AB else "")
                   + ". Check its heights against the liquid column and the "
                     "tube tip."))
-        st.stop()
+        return
     if AB:
         ab_results(R)
     else:
-        single_results(*R["A"][:3])
+        single_results(R)
+
+
+# --------------------------------------------------------------- sweep
+def sweep_params(c):
+    """(key, label, lowest, highest, default half-range) that make sense
+    for this setup."""
+    out = [("t_tip", "tube tip height (mm)", -20.0, 40.0, 5.0),
+           ("t_fill", "liquid column (mm)", 2.0, 80.0, 15.0),
+           ("t_OD", "tube outer diameter (mm)", 1.0, 12.0, 1.0),
+           ("t_wall", "tube wall thickness (mm)", 0.05, 2.0, 0.2)]
+    if not c["t_liquid"].startswith("custom"):
+        out.append(("t_temp", "sample temperature (°C)", -20.0, 100.0, 20.0))
+    if c["w_on"]:
+        out += [("w_top", "waveguide top height (mm)", -40.0, 20.0, 10.0),
+                ("w_id", "waveguide inner diameter (mm)", 1.0, 20.0, 1.5),
+                ("w_wall", "waveguide wall (mm)", 0.1, 5.0, 0.6)]
+    if c["c_on"]:
+        out += [("c_zc", "coil centre height (mm)", -20.0, 80.0, 5.0),
+                ("c_r", "coil inner radius (mm)", 1.0, 15.0, 1.5),
+                ("c_len", "coil length (mm)", 1.0, 60.0, 8.0)]
+    if c["p_on"] and c["p_bot"]:
+        out.append(("p_bot_len", "bottom plug length (mm)", 0.5, 40.0, 5.0))
+    if c["p_on"] and c["p_top"]:
+        out.append(("p_top_len", "top plunger length (mm)", 0.5, 40.0, 5.0))
+    if not (c["d_auto"] and c["c_on"]):
+        out += [("d_z0", "detected region bottom (mm)", -20.0, 80.0, 5.0),
+                ("d_z1", "detected region top (mm)", -20.0, 80.0, 5.0)]
+    out.append(("d_r", "detected radius (mm)", 0.1, 6.0, 0.5))
+    return out
+
+
+def sweep_figure(sw):
+    rows = sw["rows"]
+    v = [r["value"] for r in rows]
+    fig, ax = plt.subplots(1, 2, figsize=(7.4, 3.3))
+    for a, key, lab, col in ((ax[0], "fwhm", "linewidth, FWHM  (Hz)",
+                              "#2f6fb5"),
+                             (ax[1], "ppb", "field spread after shimming  "
+                              "(ppb)", "#c0703a")):
+        y = [r[key] for r in rows]
+        a.plot(v, y, "-o", color=col, lw=2, ms=5)
+        a.axvline(sw["current"], color=P.MUTED, lw=1, ls=(0, (4, 3)))
+        a.set_xlabel(sw["label"])
+        a.set_title(lab, fontsize=10.5)
+        a.set_ylim(bottom=0)
+        a.grid(color=P.GRID, lw=0.8)
+        a.set_axisbelow(True)
+    ax[0].text(sw["current"], ax[0].get_ylim()[1], " now", fontsize=8.5,
+               color=P.MUTED, va="top")
+    fig.tight_layout(w_pad=2.0)
+    return fig
+
+
+def tab_sweep():
+    c = cfg_now()
+    st.subheader("Sweep one parameter")
+    st.caption("Vary one thing, keep everything else, and see how the "
+               "linewidth follows. The usual questions: how far does the "
+               "waveguide have to be, how thin should the wall be, where "
+               "should the tube sit?"
+               + (f" This sweeps **setup {E}**." if AB else ""))
+    prm = sweep_params(c)
+    labels = {k: lab for k, lab, *_ in prm}
+    key = st.selectbox("parameter", [k for k, *_ in prm],
+                       format_func=lambda k: labels[k], key=f"sw_key_{E}")
+    _, label, lo, hi, half = next(p for p in prm if p[0] == key)
+    cur = float(c[key])
+    a, b, d = st.columns(3)
+    v0 = a.number_input("from", lo, hi, float(np.clip(cur - half, lo, hi)),
+                        key=f"sw_from_{E}_{key}")
+    v1 = b.number_input("to", lo, hi, float(np.clip(cur + half, lo, hi)),
+                        key=f"sw_to_{E}_{key}")
+    n = d.number_input("steps", 3, 15, 7, key=f"sw_n_{E}")
+    st.caption(f"Now: **{cur:g}**. Each step is a full field calculation, "
+               "so a big probe takes a few seconds per step.")
+    if st.button("▶  Run the sweep", type="primary", width="stretch"):
+        if v1 <= v0:
+            st.error("'to' has to be larger than 'from'.")
+        else:
+            bar = st.progress(0.0, text="sweeping…")
+            rows = C.sweep(c, key, np.linspace(v0, v1, int(n)),
+                           progress=lambda f: bar.progress(f, "sweeping…"))
+            bar.empty()
+            ss.sweep = dict(setup=E, key=key, label=label, rows=rows,
+                            current=cur, order=int(c["sh_order"]),
+                            nuc=c["nuc"])
+    sw = ss.get("sweep")
+    if not sw:
+        return
+    st.markdown(f"**{sw['label']}**"
+                + (f", setup {sw['setup']}" if AB else "")
+                + f" · shimming: {C.SHIM_LABELS[sw['order']]} · "
+                f"{C.NUC_LABEL[sw['nuc']]}")
+    ok = [r for r in sw["rows"] if np.isfinite(r["ppb"])]
+    if not ok:
+        st.error("No step gave a result: the detected region had no sample "
+                 "in it, or the geometry was impossible.")
+        return
+    best = min(ok, key=lambda r: r["ppb"])
+    st.markdown(f"Most homogeneous at **{best['value']:g}**: "
+                f"{best['ppb']:.1f} ppb left, FWHM "
+                f"{fmt(best['fwhm'], '{:.1f}')} Hz.")
+    png, pdf = show(sweep_figure(sw), pdf=True)
+    st.dataframe(
+        [{sw["label"]: round(r["value"], 4),
+          "FWHM (Hz)": round(r["fwhm"], 2),
+          "width at 0.55 % (Hz)": round(r["w055"], 1),
+          "spread after shimming (ppb)": round(r["ppb"], 2),
+          "spread before shimming (ppm)": round(r["raw"], 4)}
+         for r in sw["rows"]], hide_index=True, width="stretch")
+    csv = "\n".join(
+        [f"{sw['label']},FWHM_Hz,width_0.55pct_Hz,leftover_rms_ppb,"
+         "raw_pp_ppm"]
+        + [f"{r['value']:.5g},{r['fwhm']:.4g},{r['w055']:.4g},"
+           f"{r['ppb']:.4g},{r['raw']:.4g}" for r in sw["rows"]])
+    c3 = st.columns(3)
+    c3[0].download_button("figure (PNG)", png, "b0_sweep.png", "image/png",
+                          width="stretch")
+    c3[1].download_button("figure (PDF)", pdf, "b0_sweep.pdf",
+                          "application/pdf", width="stretch")
+    c3[2].download_button("table (CSV)", csv, "b0_sweep.csv", "text/csv",
+                          width="stretch")
+    if len(ok) < len(sw["rows"]):
+        st.caption("Empty rows: no sample in the detected region at that "
+                   "value, or an impossible geometry.")
+
+
+# ------------------------------------------------------------- 3D view
+def fig3d(cfg, cut=True):
+    """The probe as rotatable surfaces. Drawn from the same numbers the
+    solver uses; a picture, not the voxel model."""
+    phi = np.linspace(0, 1.5*np.pi if cut else 2*np.pi, 73)
+    tr, seen = [], set()
+
+    def surf(x, y, z, part, op):
+        col = COLORS[part]
+        tr.append(go.Surface(
+            x=x, y=y, z=z, surfacecolor=np.zeros_like(z),
+            colorscale=[[0, col], [1, col]], showscale=False, opacity=op,
+            name=part, legendgroup=part, showlegend=part not in seen,
+            hoverinfo="name",
+            lighting=dict(ambient=0.75, diffuse=0.5, specular=0.05)))
+        seen.add(part)
+
+    def cyl(r, z0, z1, part, op, cx=0.0, cy=0.0):
+        Pm, Zm = np.meshgrid(phi, [z0, z1])
+        surf(cx + r*np.cos(Pm), cy + r*np.sin(Pm), Zm, part, op)
+
+    def disc(r0, r1, zc, part, op, cx=0.0, cy=0.0):
+        Pm, Rm = np.meshgrid(phi, [r0, r1])
+        surf(cx + Rm*np.cos(Pm), cy + Rm*np.sin(Pm),
+             np.full(Pm.shape, float(zc)), part, op)
+
+    def ring(r0, r1, z0, z1, part, op, cx=0.0, cy=0.0):
+        cyl(r1, z0, z1, part, op, cx, cy)
+        if r0 > 0:
+            cyl(r0, z0, z1, part, op, cx, cy)
+        disc(r0, r1, z0, part, op, cx, cy)
+        disc(r0, r1, z1, part, op, cx, cy)
+
+    def cap(r, zc, depth, part, op):
+        t = np.linspace(0, np.pi/2, 14)
+        Pm, Tm = np.meshgrid(phi, t)
+        surf(r*np.cos(Tm)*np.cos(Pm), r*np.cos(Tm)*np.sin(Pm),
+             zc - depth*np.sin(Tm), part, op)
+
+    # ---- tube, sample, plugs
+    ro, ri = cfg["t_OD"]/2, cfg["t_OD"]/2 - cfg["t_wall"]
+    tip = cfg["t_tip"]
+    zl0, zl1 = C.liquid_span(cfg)
+    pb = cfg["p_on"] and cfg["p_bot"]
+    pt = cfg["p_on"] and cfg["p_top"]
+    ztop = zl1 + (cfg["p_top_len"] + 4 if pt else 8)
+    low = "plug" if pb else "sample"          # what sits on the tube floor
+    if cfg["t_bottom"] == "round":
+        zj = tip + cfg["t_botdepth"]
+        cap(ro, zj, cfg["t_botdepth"], "glass", 0.22)
+        cyl(ro, zj, ztop, "glass", 0.22)
+        cap(ri, zj, max(cfg["t_botdepth"] - cfg["t_wall"], 0.05), low, 0.95)
+        floor = zj
+    else:
+        disc(0, ro, tip, "glass", 0.22)
+        cyl(ro, tip, ztop, "glass", 0.22)
+        floor = tip + cfg["t_wall"]
+        disc(0, ri, floor, low, 0.95)
+    if pb:
+        cyl(ri, floor, zl0, "plug", 0.95)
+    cyl(ri, max(zl0, floor), zl1, "sample", 0.95)
+    disc(0, ri, zl1, "sample", 0.95)
+    if pt:
+        cyl(ri, zl1, zl1 + cfg["p_top_len"], "plug", 0.95)
+        disc(0, ri, zl1 + cfg["p_top_len"], "plug", 0.95)
+
+    # ---- RF coil: a sheet with its slots or windows cut out
+    if cfg["c_on"]:
+        pf = np.linspace(phi[0], phi[-1], 241)
+        bot = cfg["c_zc"] - cfg["c_len"]/2
+        zz = np.linspace(bot, bot + cfg["c_len"], 121)
+        Pm, Zm = np.meshgrid(pf, zz)
+        keep = np.ones(Pm.shape, bool)
+        n = int(cfg["c_nslots"])
+        if n > 0 and cfg["c_slotdeg"] > 0:
+            deg = np.degrees(Pm) % 360.0
+            for i in range(n):
+                c0 = cfg["c_phase"] + 360.0*i/n
+                d = np.abs((deg - c0 + 180.0) % 360.0 - 180.0)
+                if not cfg["c_win"]:
+                    keep &= ~(d <= cfg["c_slotdeg"]/2)
+                else:
+                    w0 = bot + cfg["c_winz0"]
+                    sl = np.degrees(cfg["c_slit"] / cfg["c_r"])
+                    keep &= ~(((d <= cfg["c_slotdeg"]/2) & (Zm >= w0)
+                               & (Zm <= w0 + cfg["c_winh"]))
+                              | ((d <= sl/2) & (Zm < w0)))
+        r = cfg["c_r"]
+        surf(r*np.cos(Pm), r*np.sin(Pm), np.where(keep, Zm, np.nan),
+             "RF coil", 1.0)
+
+    # ---- waveguide (its lower part is cut short for the picture)
+    if cfg["w_on"]:
+        wt = cfg["w_top"]
+        ring(cfg["w_id"]/2, cfg["w_id"]/2 + cfg["w_wall"],
+             wt - min(cfg["w_len"], 12.0), wt, "waveguide", 1.0)
+
+    # ---- shields, modulation coil, custom parts
+    for kind, p, label in C._parts(cfg):
+        op = {"shield": 0.55, "modulation coil": 1.0}.get(label, 0.9)
+        if kind == "annulus":
+            ring(p["r_in"], p["r_out"], p["z0"], p["z1"], label, op)
+        elif kind == "cyl":
+            ring(p["r_in"], p["r_out"], p["z0"], p["z1"], label, op,
+                 p["cx"], p["cy"])
+        else:
+            x0, x1 = p["cx"] - p["sx"]/2, p["cx"] + p["sx"]/2
+            y0, y1 = p["cy"] - p["sy"]/2, p["cy"] + p["sy"]/2
+            X = [x0, x1, x1, x0, x0, x1, x1, x0]
+            Y = [y0, y0, y1, y1, y0, y0, y1, y1]
+            Z = [p["z0"]]*4 + [p["z1"]]*4
+            tr.append(go.Mesh3d(
+                x=X, y=Y, z=Z, color=COLORS[label], opacity=op, name=label,
+                i=[0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 3, 3],
+                j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4],
+                k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7],
+                legendgroup=label, showlegend=label not in seen,
+                hoverinfo="name", flatshading=True))
+            seen.add(label)
+
+    # ---- detected region, as an outline
+    z0, z1, rr = C.detection(cfg)
+    t = np.linspace(0, 2*np.pi, 60)
+    xs, ys, zs = [], [], []
+    for zc in (z0, z1):
+        xs += list(rr*np.cos(t)) + [None]
+        ys += list(rr*np.sin(t)) + [None]
+        zs += [zc]*len(t) + [None]
+    for a in (0, np.pi/2, np.pi, 1.5*np.pi):
+        xs += [rr*np.cos(a)]*2 + [None]
+        ys += [rr*np.sin(a)]*2 + [None]
+        zs += [z0, z1, None]
+    tr.append(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines",
+                           line=dict(color="#1c2530", width=4, dash="dash"),
+                           name="detected region", hoverinfo="name"))
+
+    fig = go.Figure(tr)
+    ax = dict(backgroundcolor="#f3f5f8", gridcolor="#dfe3e8",
+              zerolinecolor="#c8ccd2")
+    fig.update_layout(
+        height=640, margin=dict(l=0, r=0, t=0, b=0),
+        legend=dict(x=0.0, y=1.0, bgcolor="rgba(255,255,255,0.6)"),
+        scene=dict(aspectmode="data",
+                   xaxis=dict(title="x (mm)", **ax),
+                   yaxis=dict(title="y (mm)", **ax),
+                   zaxis=dict(title="height (mm)", **ax),
+                   camera=dict(eye=dict(x=1.5, y=-1.5, z=0.5))))
+    return fig
+
+
+def tab_3d():
+    st.subheader("3D view" + (f" of setup {E}" if AB else ""))
+    if go is None:
+        st.info("The 3D view needs the plotly package. Install it with "
+                "`pip install plotly` and restart the app.")
+        return
+    cut = st.toggle("cut-away (remove a quarter to see inside)", value=True,
+                    key="cut3d")
+    st.caption("Drag to rotate, scroll to zoom, click a name in the legend "
+               "to hide that part.")
+    try:
+        st.plotly_chart(fig3d(cfg_now(), cut), width="stretch")
+    except Exception as ex:
+        st.error(f"This geometry cannot be drawn in 3D: {ex}")
+
+
+# --------------------------------------------------------------- about
+ABOUT = """
+### What this tool does
+
+Every material in a magnet, glass, liquid, copper, even air, is very
+slightly magnetic. Each part therefore bends the magnetic field around it a
+little. In NMR and DNP that matters: if the field is not the same everywhere
+in the sample, the line gets broad or splits.
+
+This tool computes that disturbance for a probe you describe (tube, sample,
+coil, waveguide, shields, anything else), removes what the shim coils could
+correct, and shows the NMR line you would be left with.
+
+### How it works
+
+1. Space is cut into small cubes (voxels, 0.25 mm by default). Each cube
+   gets the magnetic susceptibility χ of the material in it. Thin parts
+   such as coil foil are handled so that χ × thickness is right.
+2. The field change follows from one formula, evaluated with a fast Fourier
+   transform:  **ΔB/B₀ = FT⁻¹[ FT(χ) · (1/3 − k_z²/k²) ]**.
+   This is the standard method from MRI (Salomir 2003, Marques & Bowtell
+   2005). It is exact to first order in χ, and χ is about 10⁻⁵, so the
+   neglected part is about 10⁻¹⁰.
+3. Over the part of the sample the coil sees, the tool fits and removes
+   the field shapes a shim set can produce (up to the order you choose).
+4. What is left is turned into a spectrum: each voxel resonates at its own
+   frequency, and the line is their sum, broadened by the linewidth you
+   would have without the probe.
+
+### What it can and cannot tell you
+
+**It can:** compare designs (which tube, which wall, how far the metal
+should be, which material to use), show which part causes the damage, and
+give the linewidth a design adds.
+
+**It cannot:**
+- know your magnet. Its own imperfections, and how well it was shimmed, are
+  not modelled. Put the linewidth you measure with a good commercial probe
+  in *linewidth without the probe*; the tool adds this probe on top.
+- know how your shims were really set. It assumes the best possible setting
+  up to the chosen order. *More results* shows every order, which is the
+  honest error bar.
+- model magic-angle spinning. Spinning averages most of these effects away,
+  so a static calculation would be misleading for a MAS rotor.
+- model ferromagnetic or strongly magnetic parts, radiation damping, or
+  anything about the RF and microwave fields themselves.
+
+### How far to trust it
+
+- **The solver** is checked against exact solutions (a sphere, cylinders
+  along and across the field). Press *Check the solver* in the sidebar to
+  run the sphere at your voxel size: the error is about 0.5 %.
+- **The materials** decide the accuracy in practice. Values marked
+  *measured* come from Wapler et al. 2014 and Hoffman 2022 and are good to
+  about 0.01 ppm. Values marked *estimate* (brass, silver, sapphire...) are
+  handbook numbers: measure your own material if the result depends on it.
+- **Comparison with measured spectra** is in progress. You can overlay your
+  own spectrum under *Compare with a measured spectrum*.
+
+### Sources of the material values
+
+- F. Wapler et al., *Magnetic properties of materials for MR engineering,
+  micro-MR and beyond*, J. Magn. Reson. 242 (2014) 233.
+- R. Hoffman, *Magnetic susceptibility measurement by NMR: 2. The magnetic
+  susceptibility of NMR solvents and their chemical shifts*, J. Magn.
+  Reson. 335 (2022) 107105 (also the temperature dependence).
+- R. Salomir, B. de Senneville, C. Moonen, Concepts Magn. Reson. B 19
+  (2003) 26; J. Marques, R. Bowtell, Concepts Magn. Reson. B 25 (2005) 65.
+"""
+
+
+def tab_about():
+    st.markdown(ABOUT)
+    if CITE:
+        st.markdown("### How to cite\n\n" + CITE)
+    if AUTHOR or FEEDBACK_URL:
+        st.markdown("### Contact")
+        if AUTHOR:
+            st.markdown(AUTHOR)
+        if FEEDBACK_URL:
+            st.markdown(f"Found a problem or missing a feature? "
+                        f"[Tell us here]({FEEDBACK_URL}).")
+
+
+with right:
+    t_res, t_sweep, t_3d, t_about = st.tabs(
+        ["Result", "Sweep", "3D view", "About"])
+    with t_res:
+        tab_result()
+    with t_sweep:
+        tab_sweep()
+    with t_3d:
+        tab_3d()
+    with t_about:
+        tab_about()

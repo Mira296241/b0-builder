@@ -20,14 +20,42 @@ There are two apps. Both use the same physics (`b0core.py`).
 
 All heights are in mm from **z = 0**, the probe reference (the waveguide top, if there is one). Move the sample with "tube tip height".
 
+### New in November 2026 (after Honza's feedback)
+
+- **A / B comparison.** Sidebar toggle "Compare two setups". B starts as a copy of A; change one thing (waveguide off, another tube, another position) and Run. You get both previews on one scale, a table with A, B and the difference, both NMR lines on one plot and both field maps on one colour scale.
+- **Shimming up to 4th order** (was 2nd). The shim functions are the real solid harmonics a shim set produces (25 of them up to 4th order). For orders 0 to 2 the result is identical to before. "More results" shows the linewidth for every order, which is the honest error bar: a real shim set goes to 4th order and beyond along z but is rarely set perfectly.
+- **Compare with a measured spectrum.** Upload two columns (frequency in Hz or ppm, intensity); it is centred, scaled and drawn over the simulated line, with its FWHM.
+- **"Linewidth without the probe"** (was "natural linewidth"). Put here the linewidth measured on the same magnet with a commercial probe: that covers the sample's own width and whatever the magnet leaves after shimming. The tool adds this probe's broadening on top.
+- **Check the solver** (sidebar, Accuracy). Solves a uniform sphere, which has an exact answer, at the current voxel size: about 0.5 % error.
+- **Half the memory, twice the speed**: the FFT now runs in single precision (differs from double by 3e-6 ppm on the full probe).
+
+### Second round (9 Nov 2026)
+
+The right side now has four tabs: **Result, Sweep, 3D view, About**.
+
+- **More presets**: standard 5 mm tube, 3 mm tube, Shigemi tube, 4 mm quartz tube, FRASCAN II. No MAS rotor on purpose: spinning averages these effects, so a static calculation would mislead.
+- **Sweep tab**: vary one parameter (tube height, wall, waveguide position...) and plot the linewidth against it. Table and figure can be downloaded.
+- **3D view tab**: the probe in 3D, with a cut-away. Needs `plotly`.
+- **About tab**: what the tool does, how, what it cannot do, how far to trust it, sources. Set `AUTHOR` and `CITE` at the top of builder.py to show them there.
+- **Downloads**: figure as PNG or PDF, numbers and the NMR line as CSV.
+- **Susceptibility plugs** (Shigemi style) below and above the sample, in any material or "matched to the sample". Extra plastics from Wapler 2014 (PMMA, Kapton, polystyrene, polycarbonate...).
+- **Sample temperature**: the liquid's susceptibility follows its density. Only valid while the sample is liquid.
+- **Observed nucleus**: ¹H, ¹⁹F, ³¹P, ¹³C, ²H, ¹⁵N. Linewidths in Hz scale with the frequency.
+- **Smooth coil edges**: weights the sample by a realistic coil sensitivity instead of a sharp box. Off by default so earlier numbers stay comparable.
+- **Waveguide top height**: the waveguide can be lowered away from the tube.
+- **Share by link**: "Create a link to this setup" packs the setup into the web address.
+- **30-second tour** on first open, and a **feedback** link (`FEEDBACK_URL` at the top of builder.py).
+
+What the tool still cannot know: the magnet's own inhomogeneity and how well the shims were actually set. It predicts what the probe and sample ADD, assuming ideal shimming up to the chosen order.
+
 Differences from app.py, all small: the builder removes the uniform background before the FFT (a uniform medium only shifts the field, which the lock removes; this removes the fake edge of the computation box), uses a faster real FFT, and sizes the box to hold every part. On the FRASCAN II preset the two agree to about 3 % (6.2 vs 6.0 Hz FWHM).
 
 
 ## Install
 
-    pip install numpy matplotlib streamlit scipy
+    pip install numpy matplotlib streamlit scipy plotly
 
-(scipy is optional: it makes the builder faster.)
+(scipy is optional: it makes the builder faster and lighter.)
 
 ## Run the UI
 

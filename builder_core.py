@@ -15,10 +15,100 @@ things are new here:
 3. A faster, lower-memory FFT (real-to-complex, multithreaded when scipy is
    installed). Same maths as b0core.field_shift_ppm.
 """
+import base64
+import json
+import threading
+import zlib
+from math import erf
+
 import numpy as np
 
-from b0core import (MATERIALS_PPM, build_tube, build_coil, build_cwg,
-                    build_annulus, shim, report, lineshape_report)
+from b0core import (MATERIALS_PPM, SOURCES, build_tube, build_coil,
+                    build_cwg, build_annulus, width_at)
+
+# build_all writes per-setup entries into the shared materials table, so
+# two people on the same server must not build at the same moment.
+_LOCK = threading.Lock()
+
+# ------------------------------------------------- extra materials
+# All from Wapler et al. 2014, Table 1: measured relative to water, here
+# on the same water reference (-9.032) as the entries already in b0core.
+_W14 = "Wapler et al., J Magn Reson 242 (2014) 233, arXiv:1403.4760, Table 1"
+for _n, _d in (("PMMA (acrylic)", -0.023), ("polyimide (Kapton)", 0.117),
+               ("polystyrene", -0.141), ("polycarbonate", -0.210),
+               ("nylon (PA6)", -0.446), ("polypropylene", -0.523),
+               ("polyethylene (HDPE)", -0.635), ("PVC", -1.673),
+               ("FR4 circuit board", 5.29)):
+    MATERIALS_PPM.setdefault(_n, round(-9.032 + _d, 2))
+    SOURCES.setdefault(_n, ("measured", _W14 + f": {_d:+.3f} relative to "
+                            "water at -9.032"))
+
+MATCHED = "matched to the sample"
+
+# ------------------------------------------------------ temperature
+# Volume susceptibility against temperature, measured 0 to 70 °C by
+# Hoffman, J Magn Reson 335 (2022) 107105, Table 4. Slope in ppm per °C
+# (positive: less diamagnetic when warmer, because the liquid expands).
+# The table values in b0core are his 25 °C values.
+T_REF = 25.0
+TEMP_SLOPE = {
+    "acetone-d6": 8.0e-3, "acetonitrile-d3": 9.4e-3, "benzene-d6": 9.6e-3,
+    "chloroform-d": 12.1e-3, "DMSO": 7.4e-3, "methanol-d4": 7.8e-3,
+    "THF-d8": 10.2e-3, "toluene-d8": 8.6e-3,
+    # protiated: the deuterated slope (same expansion)
+    "toluene": 8.6e-3, "methanol": 7.8e-3,
+    # estimates from the thermal expansion coefficient
+    "ethanol": 7.8e-3, "glycerol/water 60:40": 4.0e-3,
+}
+TEMP_ESTIMATED = ("ethanol", "glycerol/water 60:40")
+# density of water, g/cm3 (its mass susceptibility barely changes)
+_WATER_T = np.array([0, 4, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100.])
+_WATER_RHO = np.array([0.99984, 0.99997, 0.99970, 0.99910, 0.99821, 0.99705,
+                       0.99565, 0.99222, 0.98804, 0.98320, 0.97778, 0.97182,
+                       0.96535, 0.95840])
+
+
+def chi_sample(cfg):
+    """Sample susceptibility (ppm) at the chosen temperature."""
+    name = cfg["t_liquid"]
+    if name == "custom (sample)":
+        return float(cfg["t_liquid_chi"])
+    chi = MATERIALS_PPM[name]
+    T = float(cfg.get("t_temp", T_REF))
+    if T == T_REF:
+        return chi
+    if name == "water":
+        rho = np.interp([T, T_REF], _WATER_T, _WATER_RHO)
+        return float(chi * rho[0] / rho[1])
+    if name == "D2O":                      # Hoffman: -3.2e-3 T + 69e-6 T²
+        f = lambda t: -3.2e-3 * t + 69e-6 * t * t
+        return float(chi + f(T) - f(T_REF))
+    return float(chi + TEMP_SLOPE.get(name, 0.0) * (T - T_REF))
+
+
+def chi_tube(cfg):
+    if cfg["t_glass"] == "custom (tube)":
+        return float(cfg["t_glass_chi"])
+    return MATERIALS_PPM[cfg["t_glass"]]
+
+
+def chi_plug(cfg, which):
+    m = cfg[f"p_{which}_mat"]
+    return chi_sample(cfg) if m == MATCHED else MATERIALS_PPM[m]
+
+
+# ----------------------------------------------------------- nuclei
+# resonance frequency relative to 1H
+NUCLEI = {"1H": 1.0, "19F": 0.940940, "31P": 0.404808, "13C": 0.251450,
+          "2H": 0.153506, "15N": 0.101368}
+NUC_LABEL = {"1H": "¹H", "19F": "¹⁹F", "31P": "³¹P", "13C": "¹³C",
+             "2H": "²H", "15N": "¹⁵N"}
+
+
+def f_obs(cfg):
+    """Observed frequency in MHz: the magnet's 1H frequency times the
+    nucleus ratio."""
+    return float(cfg["f_MHz"]) * NUCLEI[cfg.get("nuc", "1H")]
 
 try:
     from scipy import fft as _fft
@@ -38,13 +128,16 @@ BLANK = dict(
     t_OD=5.0, t_wall=0.5, t_fill=40.0, t_glass="borosilicate",
     t_liquid="water", t_out="air", t_tip=0.0, t_bottom="round",
     t_botdepth=2.0, t_punt=2.0, t_men=0.0,
-    t_glass_chi=-11.0, t_liquid_chi=-9.0,
+    t_glass_chi=-11.0, t_liquid_chi=-9.0, t_temp=25.0,
+    # susceptibility plugs (Shigemi style)
+    p_on=False, p_bot=True, p_bot_len=8.0, p_bot_mat=MATCHED,
+    p_top=True, p_top_len=10.0, p_top_mat=MATCHED,
     # RF coil
     c_on=False, c_r=3.5, c_t=50.0, c_len=18.0, c_zc=20.0, c_mat="copper",
     c_nslots=2, c_slotdeg=90.0, c_phase=90.0, c_win=False, c_winz0=3.0,
     c_winh=12.0, c_slit=1.0,
     # waveguide
-    w_on=False, w_id=5.0, w_wall=1.25, w_len=20.0, w_mat="brass",
+    w_on=False, w_id=5.0, w_wall=1.25, w_len=20.0, w_mat="brass", w_top=0.0,
     # RF shields
     rs_on=False, rs_bot=True, rs_side=True, rs_mat="copper",
     rs_b_rin=8.0, rs_b_rout=17.925, rs_b_z0=-0.74, rs_b_z1=-0.55,
@@ -53,8 +146,8 @@ BLANK = dict(
     m_on=False, m_rin=9.1, m_rout=12.7, m_z0=5.0, m_z1=24.55, m_fill=0.75,
     m_mat="copper",
     # detection and shimming
-    d_auto=True, d_r=1.5, d_z0=10.0, d_z1=25.0,
-    sh_order=2, f_MHz=500.0, nat=0.5,
+    d_auto=True, d_r=1.5, d_z0=10.0, d_z1=25.0, d_soft=False, d_edge=2.0,
+    sh_order=2, f_MHz=500.0, nuc="1H", nat=0.5,
     # numerics
     V=0.25,
 )
@@ -72,16 +165,41 @@ FRASCAN = dict(BLANK,
     w_on=True, w_id=5.0, w_wall=1.25, w_len=20.0, w_mat="brass",
     rs_on=True, rs_bot=True, rs_side=True,
     m_on=True,
-    d_auto=True, d_r=1.5,
+    d_auto=True, d_r=1.5, d_edge=2.5,
 )
+
+TUBE3 = dict(BLANK, t_OD=3.0, t_wall=0.29, t_liquid="chloroform-d",
+             c_on=True, c_r=2.2, c_t=50.0, c_len=16.0, c_zc=20.0,
+             d_r=1.0, d_edge=1.2)
+
+# 5 mm Shigemi: flat bottom, 8 mm matched glass below the sample and a
+# matched plunger above, so the coil only ever sees matched material.
+SHIGEMI = dict(BLANK, t_wall=0.4, t_bottom="flat", t_liquid="D2O",
+               t_fill=18.0, p_on=True, p_bot=True, p_bot_len=8.0,
+               p_top=True, p_top_len=15.0,
+               c_on=True, c_r=3.5, c_t=50.0, c_len=18.0, c_zc=17.4,
+               d_r=1.8)
+
+QUARTZ4 = dict(BLANK, t_OD=4.0, t_wall=0.5, t_glass="fused quartz",
+               t_liquid="toluene", t_fill=30.0, d_auto=False, d_r=1.3,
+               d_z0=8.0, d_z1=23.0)
 
 PRESETS = {
     "Blank (tube only)": (BLANK, "A tube of water in a perfect magnet. "
                           "Add the parts your probe has."),
-    "Standard NMR probe": (STANDARD, "5 mm tube, CDCl₃, a plain copper "
+    "Standard 5 mm tube": (STANDARD, "5 mm tube, CDCl₃, a plain copper "
                            "coil. Real commercial coils use "
                            "susceptibility-matched wire, so this is a "
                            "pessimistic version."),
+    "3 mm tube": (TUBE3, "3 mm tube (wall 0.29 mm), CDCl₃, a small copper "
+                  "coil."),
+    "Shigemi tube (5 mm)": (SHIGEMI, "Flat bottom, only 18 mm of D₂O "
+                            "between a matched glass bottom and a matched "
+                            "plunger. Switch the plugs off to see what "
+                            "they are for."),
+    "4 mm quartz tube (EPR / DNP)": (QUARTZ4, "4 mm fused quartz tube with "
+                                     "toluene, no coil: set the detected "
+                                     "region by hand."),
     "FRASCAN II": (FRASCAN, "Our DNP probe, from the Fusion CAD (Oct 2026): "
                    "slotted coil with windows, brass waveguide, RF "
                    "shields, modulation coil."),
@@ -94,18 +212,20 @@ CUSTOM_DEFAULT = dict(kind="cylinder / ring", mat="PTFE", r_in=0.0,  # a small P
 
 # ---------------------------------------------------------- materials
 
-def chi_of(name, cfg):
-    """Susceptibility in ppm, including the two custom entries."""
-    if name == "custom (tube)":
-        return float(cfg["t_glass_chi"])
-    if name == "custom (sample)":
-        return float(cfg["t_liquid_chi"])
-    return MATERIALS_PPM[name]
+def _register(cfg):
+    """Per-setup materials, under names b0core can look up."""
+    MATERIALS_PPM["__sample"] = chi_sample(cfg)
+    MATERIALS_PPM["__tube"] = chi_tube(cfg)
+    MATERIALS_PPM["__plug_bot"] = chi_plug(cfg, "bot")
+    MATERIALS_PPM["__plug_top"] = chi_plug(cfg, "top")
 
 
-def _register_custom(cfg):
-    MATERIALS_PPM["custom (tube)"] = float(cfg["t_glass_chi"])
-    MATERIALS_PPM["custom (sample)"] = float(cfg["t_liquid_chi"])
+def liquid_span(cfg):
+    """(z_bottom, z_top) of the liquid column on the axis."""
+    z0 = cfg["t_tip"] + cfg["t_wall"]
+    if cfg["p_on"] and cfg["p_bot"]:
+        z0 += cfg["p_bot_len"]
+    return z0, z0 + cfg["t_fill"]
 
 
 # ----------------------------------------------------------- geometry
@@ -191,14 +311,16 @@ def extent(cfg):
     """(radial half-width, z_lo, z_hi) that holds every enabled part."""
     r = cfg["t_OD"] / 2
     zlo = cfg["t_tip"] - 1.0
-    zhi = cfg["t_tip"] + cfg["t_wall"] + cfg["t_fill"] + 20.0
+    zhi = liquid_span(cfg)[1] + 20.0
+    if cfg["p_on"] and cfg["p_top"]:
+        zhi = max(zhi, liquid_span(cfg)[1] + cfg["p_top_len"] + 5.0)
     if cfg["c_on"]:
         r = max(r, cfg["c_r"] + cfg["c_t"] * 1e-3)
         zlo = min(zlo, cfg["c_zc"] - cfg["c_len"]/2)
         zhi = max(zhi, cfg["c_zc"] + cfg["c_len"]/2)
     if cfg["w_on"]:
         r = max(r, cfg["w_id"]/2 + cfg["w_wall"])
-        zlo = min(zlo, -cfg["w_len"])
+        zlo = min(zlo, cfg["w_top"] - cfg["w_len"])
     for kind, p, _ in _parts(cfg):
         if kind == "box":
             r = max(r, abs(p["cx"]) + p["sx"]/2, abs(p["cy"]) + p["sy"]/2)
@@ -239,15 +361,45 @@ def choose_grid(cfg):
 def build_all(cfg, x, y, z):
     """Full susceptibility map (ppm, background removed) and the masks the
     plots need. Works on any grid, including a single y = 0 slice."""
-    _register_custom(cfg)
+    with _LOCK:
+        return _build_all(cfg, x, y, z)
+
+
+def _build_all(cfg, x, y, z):
+    _register(cfg)
     out = cfg["t_out"]
+    h = x[1] - x[0]
+    plug_b = cfg["p_on"] and cfg["p_bot"]
+    plug_t = cfg["p_on"] and cfg["p_top"]
+    zl0, zl1 = liquid_span(cfg)
     kw = dict(tube_OD=cfg["t_OD"], wall=cfg["t_wall"], d_cwg=cfg["t_tip"],
-              fill_h=cfg["t_fill"], bottom=cfg["t_bottom"],
+              fill_h=zl1 - (cfg["t_tip"] + cfg["t_wall"]),
+              bottom=cfg["t_bottom"],
               punt_r=cfg["t_punt"], bot_depth=cfg["t_botdepth"],
-              glass=cfg["t_glass"], liquid=cfg["t_liquid"], outside=out,
-              men_depth=cfg["t_men"])
+              glass="__tube", liquid="__sample", outside=out,
+              men_depth=0.0 if plug_t else cfg["t_men"])
     chi, liq, gls = build_tube(x, y, z, **kw)
-    masks = {"glass": gls, "sample": liq}
+    masks = {"glass": gls}
+    liq0 = liq                      # the bore filled up to the liquid top
+    if plug_b:
+        # the bottom of the bore, up to zl0, is solid plug instead of liquid
+        ov = _overlap(z, h, -1e9, zl0)[None, None, :]
+        chi = chi + (MATERIALS_PPM["__plug_bot"]
+                     - MATERIALS_PPM["__sample"]) * liq * ov
+        masks["plug"] = liq & (ov > 0.5)
+        liq = liq & (ov <= 0.0)
+    if plug_t:
+        # fills the bore above the liquid. Same voxel rule as the bore in
+        # build_tube (voxel centre inside the inner radius), so the plunger
+        # and the glass wall neither overlap nor leave a gap.
+        ri = cfg["t_OD"]/2 - cfg["t_wall"]
+        bore = (np.hypot(x[:, None], y[None, :]) <= ri)[:, :, None]
+        f = (bore * _overlap(z, h, zl1, zl1 + cfg["p_top_len"])[None, None, :]
+             * ~liq0)             # never on top of a liquid voxel
+        chi = chi + (MATERIALS_PPM["__plug_top"] - MATERIALS_PPM[out]) * f
+        pm = f > 0.5
+        masks["plug"] = masks.get("plug", np.zeros_like(pm)) | pm
+    masks["sample"] = liq
     if cfg["c_on"]:
         win = (dict(win_z0=cfg["c_winz0"], win_h=cfg["c_winh"],
                     slit_mm=cfg["c_slit"]) if cfg["c_win"] else None)
@@ -261,8 +413,8 @@ def build_all(cfg, x, y, z):
         masks["RF coil"] = cm
     if cfg["w_on"]:
         wchi, wm = build_cwg(x, y, z, inner_d=cfg["w_id"], wall=cfg["w_wall"],
-                             length=cfg["w_len"], material=cfg["w_mat"],
-                             outside=out)
+                             length=cfg["w_len"], z_top=cfg["w_top"],
+                             material=cfg["w_mat"], outside=out)
         chi = chi + wchi
         masks["waveguide"] = wm
     for kind, p, label in _parts(cfg):
@@ -352,46 +504,174 @@ def shim_basis(X, Y, Z, mask, order):
     return np.vstack(cols).T
 
 
-def shim_any(dB, X, Y, Z, mask, order):
-    """Residual after the best shim set up to `order` (0 to 4)."""
+def shim_any(dB, X, Y, Z, mask, order, w=None):
+    """Residual after the best shim set up to `order` (0 to 4). With
+    weights w (one per voxel of the mask) the fit minimises the weighted
+    spread, which is what shimming on the signal does."""
     A = shim_basis(X, Y, Z, mask, order)
     b = np.asarray(dB[mask], float)
-    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+    if w is None:
+        coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+    else:
+        sw = np.sqrt(w)
+        coef, *_ = np.linalg.lstsq(A * sw[:, None], b * sw, rcond=None)
     return b - A @ coef
+
+
+def lineshape_w(res_ppm, f_MHz, nat_Hz=1.0, w=None, n=2001):
+    """b0core.lineshape with a weight per voxel (the coil sensitivity).
+    With w=None it is the same calculation. Returns (nu, spec, widths)."""
+    hz = np.asarray(res_ppm, float).ravel() * f_MHz
+    lo, hi = float(hz.min()), float(hz.max())
+    span = hi - lo
+    pad = max(40.0 * nat_Hz, 0.3 * span, 1e-6)
+    full = span + 2 * pad
+    n = int(max(n, 10 * full / max(nat_Hz, 1e-9))) | 1
+    n = min(n, 200001)
+    nu = np.linspace(lo - pad, hi + pad, n)
+    d = nu[1] - nu[0]
+    edges = np.concatenate([nu - d / 2, [nu[-1] + d / 2]])
+    hist, _ = np.histogram(hz, bins=edges, weights=w)
+    half = max(nat_Hz / 2.0, 1e-9)
+    t = nu - nu[n // 2]
+    kern = half**2 / (t**2 + half**2)
+    if w is None:
+        N, sd = hz.size, float(hz.std())
+    else:                       # effective sample size and weighted spread
+        N = float(w.sum())**2 / float((w**2).sum())
+        mu = float((w * hz).sum() / w.sum())
+        sd = float(np.sqrt((w * (hz - mu)**2).sum() / w.sum()))
+    h = 1.06 * sd * N ** (-0.2) if (N > 1 and sd > 0) else 0.0
+    if h > d:
+        g = np.exp(-0.5 * (t / h) ** 2)
+        kern = np.convolve(kern, g / g.sum(), mode="same")
+    spec = np.convolve(hist.astype(float), kern, mode="same")
+    m = spec.max()
+    spec = spec / m if m > 0 else spec
+    return nu, spec, {"fwhm": width_at(nu, spec, 0.5),
+                      "w055": width_at(nu, spec, 0.0055),
+                      "w011": width_at(nu, spec, 0.0011)}
+
+
+def coil_weight(z, z0, z1, edge):
+    """Signal weight along z for a coil whose window is z0..z1: its B1 is
+    flat inside and falls smoothly to zero over about `edge` mm outside.
+    A 90° pulse set at the centre excites sin(90°·b) and is received with
+    b, so the weight is b·sin(90°·b). A simple model of a real coil, not
+    a field calculation."""
+    S = np.vectorize(lambda u: 0.5 * (1 + erf(1.2 * u)))
+    e = max(edge, 1e-6)
+    b = S((z - z0) / e) * S((z1 - z) / e)
+    return b * np.sin(np.pi / 2 * b)
 
 
 def analyse(sol, cfg):
     """Cheap step: detection region, shimming, lineshape. Re-run freely."""
     x, y, z, dB, liq = sol["x"], sol["y"], sol["z"], sol["dB"], sol["liq"]
     z0, z1, r = detection(cfg)
+    soft = bool(cfg.get("d_soft"))
+    if soft:
+        wz = coil_weight(z, z0, z1, float(cfg["d_edge"]))
+    else:
+        wz = ((z >= z0) & (z <= z1)).astype(float)
     R2 = x[:, None]**2 + y[None, :]**2
-    act = (R2[:, :, None] <= r*r) & (z >= z0)[None, None, :] \
-        & (z <= z1)[None, None, :] & liq
+    act = (R2[:, :, None] <= r*r) & (wz > 0.01)[None, None, :] & liq
     n = int(act.sum())
     if n < 50:
         return None
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij", sparse=True)
     X, Y, Z = np.broadcast_arrays(X, Y, Z)
+    w = np.broadcast_to(wz[None, None, :], dB.shape)[act] if soft else None
+    f = f_obs(cfg)
     order = int(cfg["sh_order"])
+
+    def wstd(v):
+        if w is None:
+            return float(v.std())
+        mu = (w * v).sum() / w.sum()
+        return float(np.sqrt((w * (v - mu)**2).sum() / w.sum()))
+
     raw = np.asarray(dB[act], float)
-    res = shim_any(dB, X, Y, Z, act, order)
-    rep = {"raw_ppm_pp": float(raw.max() - raw.min()),
-           "raw_ppm_rms": float(raw.std()),
-           "shim_ppm_pp": float(res.max() - res.min()),
-           "shim_ppm_rms": float(res.std()),
-           "shim_Hz_rms": float(res.std() * cfg["f_MHz"])}
-    nu, sp, wd = lineshape_report(res, cfg["f_MHz"], nat_Hz=cfg["nat"])
     # how the answer depends on the shim order: the honest error bar on
     # "what would I measure", since nobody knows how well a real shim set
     # was actually set.
-    by_order = []
+    by_order, keep = [], None
     for o in range(5):
-        ro = res if o == order else shim_any(dB, X, Y, Z, act, o)
-        wo = wd if o == order else lineshape_report(
-            ro, cfg["f_MHz"], nat_Hz=cfg["nat"])[2]
-        by_order.append((o, float(ro.std()) * 1000, wo["fwhm"], wo["w055"]))
-    return dict(rep=rep, res=res, raw=raw, nu=nu, sp=sp, wd=wd,
-                n=n, z0=z0, z1=z1, r=r, by_order=by_order)
+        ro = shim_any(dB, X, Y, Z, act, o, w)
+        nu_o, sp_o, wd_o = lineshape_w(ro, f, cfg["nat"], w)
+        by_order.append((o, wstd(ro) * 1000, wd_o["fwhm"], wd_o["w055"]))
+        if o == order:
+            keep = (ro, nu_o, sp_o, wd_o)
+    res, nu, sp, wd = keep
+    rep = {"raw_ppm_pp": float(raw.max() - raw.min()),
+           "raw_ppm_rms": wstd(raw),
+           "shim_ppm_pp": float(res.max() - res.min()),
+           "shim_ppm_rms": wstd(res),
+           "shim_Hz_rms": wstd(res) * f}
+    return dict(rep=rep, res=res, raw=raw, w=w, nu=nu, sp=sp, wd=wd, n=n,
+                z0=z0, z1=z1, r=r, by_order=by_order, f=f, soft=soft)
+
+
+def sweep(cfg, key, values, progress=None):
+    """Solve the setup once per value of one parameter. Returns a list of
+    dicts: value, fwhm (Hz), w055 (Hz), ppb (leftover rms), raw (ppm p-p).
+    A value with no sample in the detected region gives nan."""
+    rows = []
+    for i, v in enumerate(values):
+        c = dict(cfg)
+        c[key] = float(v)
+        try:
+            an = analyse(solve(c), c)
+        except Exception:            # an impossible geometry at this value
+            an = None
+        if an is None:
+            rows.append(dict(value=float(v), fwhm=np.nan, w055=np.nan,
+                             ppb=np.nan, raw=np.nan))
+        else:
+            rows.append(dict(value=float(v), fwhm=an["wd"]["fwhm"],
+                             w055=an["wd"]["w055"],
+                             ppb=an["rep"]["shim_ppm_rms"] * 1000,
+                             raw=an["rep"]["raw_ppm_pp"]))
+        if progress:
+            progress((i + 1) / len(values))
+    return rows
+
+
+# ------------------------------------------------------- share links
+
+def coerce(d):
+    """A full, type-safe setup from a possibly partial or older dict."""
+    new = dict(BLANK)
+    for k, v in d.items():
+        if k in BLANK:
+            d0 = BLANK[k]
+            try:
+                new[k] = (bool(v) if isinstance(d0, bool) else
+                          float(v) if isinstance(d0, float) else
+                          int(v) if isinstance(d0, int) else str(v))
+            except (TypeError, ValueError):
+                pass
+    custom = []
+    for p in d.get("custom", []) or []:
+        q = dict(CUSTOM_DEFAULT)
+        q.update({k: p[k] for k in CUSTOM_DEFAULT if k in p})
+        custom.append(q)
+    return new, custom
+
+
+def encode_setup(cfg):
+    """Compact text for a URL: only what differs from the blank setup."""
+    d = {k: v for k, v in cfg.items() if k in BLANK and BLANK[k] != v}
+    if cfg.get("custom"):
+        d["custom"] = cfg["custom"]
+    raw = json.dumps(d, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
+
+
+def decode_setup(code):
+    pad = "=" * (-len(code) % 4)
+    raw = zlib.decompress(base64.urlsafe_b64decode(code + pad))
+    return coerce(json.loads(raw))
 
 
 # ----------------------------------------------------------- self check

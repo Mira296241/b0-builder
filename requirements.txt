@@ -1,4 +1,5 @@
-   numpy
-   scipy
-   matplotlib
-   streamlit
+numpy
+scipy
+matplotlib
+streamlit
+plotly
