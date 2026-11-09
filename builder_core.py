@@ -43,6 +43,14 @@ for _n, _d in (("PMMA (acrylic)", -0.023), ("polyimide (Kapton)", 0.117),
     SOURCES.setdefault(_n, ("measured", _W14 + f": {_d:+.3f} relative to "
                             "water at -9.032"))
 
+MATERIALS_PPM.setdefault("SLA resin", -9.0)
+SOURCES.setdefault("SLA resin", ("estimate", "acrylate photopolymer, taken "
+                   "close to PMMA; not measured"))
+MATERIALS_PPM.setdefault("ceramic (chip capacitor)", -18.0)
+SOURCES.setdefault("ceramic (chip capacitor)", (
+    "estimate", "taken as alumina. The real value depends on the dielectric "
+    "and the terminations and is NOT known: measure or ask the maker"))
+
 MATCHED = "matched to the sample"
 
 # ------------------------------------------------------ temperature
@@ -156,17 +164,57 @@ STANDARD = dict(BLANK, t_wall=0.4, t_liquid="chloroform-d",
                 c_on=True, c_r=3.5, c_t=50.0, c_len=18.0, c_zc=20.0,
                 d_r=1.8)
 
+# FRASCAN II, read from the Fusion assembly NMR_Probe_v617 (STEP export,
+# 9 Nov 2026). z = 0 is the waveguide top; the CAD has the tube tip 1.0 mm
+# above it. Materials from J. Dubsky's thesis, section 2.3.
 FRASCAN = dict(BLANK,
-    t_OD=5.0, t_wall=0.5, t_fill=45.0, t_glass="fused quartz",
-    t_liquid="toluene", t_tip=0.5, t_bottom="round", t_botdepth=2.0,
+    t_OD=4.98, t_wall=0.39, t_fill=34.0, t_glass="fused quartz",
+    t_liquid="toluene", t_tip=1.0, t_bottom="round", t_botdepth=2.45,
     c_on=True, c_r=5.0, c_t=100.0, c_len=39.0, c_zc=15.0, c_nslots=2,
-    c_slotdeg=88.0, c_phase=20.0, c_win=True, c_winz0=12.0, c_winh=15.0,
+    c_slotdeg=90.0, c_phase=90.0, c_win=True, c_winz0=12.0, c_winh=15.0,
     c_slit=1.2,
     w_on=True, w_id=5.0, w_wall=1.25, w_len=20.0, w_mat="brass",
     rs_on=True, rs_bot=True, rs_side=True,
-    m_on=True,
+    rs_b_rin=8.0, rs_b_rout=17.93, rs_b_z0=-0.75, rs_b_z1=-0.55,
+    rs_s_rin=9.0, rs_s_rout=9.1, rs_s_z0=4.95, rs_s_z1=25.05,
+    m_on=True, m_rin=9.1, m_rout=12.6, m_z0=5.0, m_z1=24.55, m_fill=0.75,
     d_auto=True, d_r=1.5, d_edge=2.5,
 )
+
+
+def _ring(name, mat, r0, r1, z0, z1):
+    return dict(name=name, on=True, kind="cylinder / ring", mat=mat,
+                r_in=r0, r_out=r1, cx=0.0, cy=0.0, sx=4.0, sy=4.0,
+                z0=z0, z1=z1, fill=1.0)
+
+
+def _box(name, mat, cx, cy, sx, sy, z0, z1):
+    return dict(name=name, on=True, kind="box", mat=mat, r_in=0.0,
+                r_out=1.0, cx=cx, cy=cy, sx=sx, sy=sy, z0=z0, z1=z1,
+                fill=1.0)
+
+
+_SP, _LID = "modulation coil spool (PEEK)", "lid (SLA resin)"
+_CAP = "chip capacitor (χ unknown)"
+# Parts of the probe head that are not one of the standard parts above.
+# Bodies of revolution are cut into rings; heights in the probe frame.
+FRASCAN_PARTS = [
+    _ring("RF coil former (glass)", "borosilicate", 4.55, 5.0, -18.25, 46.75),
+    _ring("RF coil ground", "copper", 5.0, 5.1, -18.25, -6.25),
+    _ring(_SP, "PEEK", 8.0, 17.93, -0.55, 2.45),
+    _ring(_SP, "PEEK", 8.0, 12.6, 2.45, 4.95),
+    _ring(_SP, "PEEK", 8.0, 9.0, 4.95, 25.05),
+    _ring(_SP, "PEEK", 8.0, 12.6, 25.05, 34.24),
+    _ring(_SP, "PEEK", 6.5, 12.6, 34.24, 37.24),
+    _ring(_SP, "PEEK", 5.0, 12.6, 37.24, 37.95),
+    _ring(_SP, "PEEK", 5.0, 9.0, 37.95, 46.75),
+    _ring(_LID, "SLA resin", 9.35, 17.93, 37.95, 55.25),
+    _ring(_LID, "SLA resin", 4.5, 9.35, 46.8, 51.2),
+    _ring(_LID, "SLA resin", 2.7, 9.35, 51.2, 55.5),
+    _ring("electronics support (PEEK)", "PEEK", 10.05, 17.93, -3.25, -0.75),
+    dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, 6.09, 3.0, 2.02, 4.98, 7.5), on=False),
+    dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, -6.09, 3.0, 2.02, 4.98, 7.5), on=False),
+]
 
 TUBE3 = dict(BLANK, t_OD=3.0, t_wall=0.29, t_liquid="chloroform-d",
              c_on=True, c_r=2.2, c_t=50.0, c_len=16.0, c_zc=20.0,
@@ -200,12 +248,23 @@ PRESETS = {
     "4 mm quartz tube (EPR / DNP)": (QUARTZ4, "4 mm fused quartz tube with "
                                      "toluene, no coil: set the detected "
                                      "region by hand."),
-    "FRASCAN II": (FRASCAN, "Our DNP probe, from the Fusion CAD (Oct 2026): "
-                   "slotted coil with windows, brass waveguide, RF "
-                   "shields, modulation coil."),
+    "FRASCAN II": (FRASCAN, "Our DNP probe, read from the Fusion CAD "
+                   "(v617): slotted coil with windows on a glass former, "
+                   "brass waveguide, RF shields, modulation coil on its "
+                   "PEEK spool, lid, and the two chip capacitors at the "
+                   "coil."),
 }
+# extra parts that come with a preset
+PRESET_PARTS = {"FRASCAN II": FRASCAN_PARTS}
+# colours for named extra parts (anything else gets the 'custom' colour)
+PART_COLORS = {"RF coil former (glass)": "#bcd3e6",
+               "RF coil ground": "#c98a5a",
+               _SP: "#d8cfa6", _LID: "#c9c9d4",
+               "electronics support (PEEK)": "#b9ad82",
+               _CAP: "#6b5b95"}
 
-CUSTOM_DEFAULT = dict(kind="cylinder / ring", mat="PTFE", r_in=0.0,  # a small PTFE lens below the tube
+CUSTOM_DEFAULT = dict(name="", on=True,
+                      kind="cylinder / ring", mat="PTFE", r_in=0.0,  # a small PTFE lens below the tube
                       r_out=2.0, cx=0.0, cy=0.0, sx=4.0, sy=4.0,
                       z0=-6.0, z1=-1.0, fill=1.0)
 
@@ -263,14 +322,17 @@ def _parts(cfg):
                     z0=cfg["m_z0"], z1=cfg["m_z1"], fill=cfg["m_fill"],
                     material=cfg["m_mat"]), "modulation coil"))
     for p in cfg.get("custom", []):
+        if not p.get("on", True):
+            continue
+        label = p.get("name") or "custom"
         if p["kind"] == "box":
             out.append(("box", dict(cx=p["cx"], cy=p["cy"], sx=p["sx"],
                         sy=p["sy"], z0=p["z0"], z1=p["z1"], fill=p["fill"],
-                        material=p["mat"]), "custom"))
+                        material=p["mat"]), label))
         else:
             out.append(("cyl", dict(cx=p["cx"], cy=p["cy"], r_in=p["r_in"],
                         r_out=p["r_out"], z0=p["z0"], z1=p["z1"],
-                        fill=p["fill"], material=p["mat"]), "custom"))
+                        fill=p["fill"], material=p["mat"]), label))
     return out
 
 

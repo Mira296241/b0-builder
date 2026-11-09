@@ -9,6 +9,7 @@ matching is app.py. Both use the same physics (b0core.py).
 """
 import io
 import json
+import os
 import uuid
 
 import numpy as np
@@ -100,7 +101,12 @@ def apply_preset():
     _forget_widgets(e)
     ss.preset[e] = name
     ss.cfg[e] = dict(C.PRESETS[name][0])
-    ss.cust[e] = []
+    ss.cust[e] = [dict(q, id=uuid.uuid4().hex[:8])
+                  for q in C.PRESET_PARTS.get(name, [])]
+    c0 = ss.cfg[e]
+    # look through the coil windows when they face y
+    ss.cut_plane = ("y" if c0["c_on"] and c0["c_nslots"]
+                    and round(c0["c_phase"]) % 180 == 90 else "x")
     ss.auto_run = True
 
 
@@ -466,54 +472,96 @@ with left:
                      "packs to about 0.75.")
             mat("wire metal", "m_mat", SOLIDS)
 
-    # ---------------------------------------------------- custom parts
-    for p in list(ss.cust[E]):
-        pid = p["id"]
-        with st.expander(f"Custom part · {p['kind']} · {p['mat']}",
-                         expanded=False):
-            def cw(widget, label, k, **kw):
-                key = f"cw_{pid}_{k}"
-                if key not in ss:
-                    ss[key] = p[k]
-                p[k] = widget(label, key=key, **kw)
-                return p[k]
+    # ---------------------------------------------------- extra parts
+    parts = ss.cust[E]
+    if ss.pop("_reset_inc", False):          # set by the buttons below
+        ss.pop(WK + "_inc", None)
+    if "_pending_sel" in ss:
+        ss[WK + "_sel"] = ss.pop("_pending_sel")
 
-            def cnum(label, k, lo, hi, step):
-                return cw(st.number_input, label, k, min_value=float(lo),
-                          max_value=float(hi), step=float(step))
+    def part_title(q):
+        return q.get("name") or f"{q['kind']} · {q['mat']}"
 
-            cw(st.radio, "shape", "kind", options=["cylinder / ring", "box"],
-               horizontal=True)
-            opts = SOLIDS if p["mat"] in SOLIDS else SOLIDS + [p["mat"]]
-            cw(st.selectbox, "material", "mat", options=opts,
-               format_func=mat_label)
-            a, b = st.columns(2)
-            if p["kind"] == "box":
+    if parts:
+        st.markdown(f"**Extra parts ({len(parts)})**")
+        groups = list(dict.fromkeys(part_title(q) for q in parts))
+        gk = WK + "_inc"
+        if gk not in ss:
+            ss[gk] = [g for g in groups
+                      if any(q.get("on", True) for q in parts
+                             if part_title(q) == g)]
+        ss[gk] = [g for g in ss[gk] if g in groups]
+        inc = st.multiselect(
+            "included in the calculation", groups, key=gk,
+            help="Remove a part here to see what it does to the field. "
+                 "It stays in the list, so you can put it back.")
+        for q in parts:
+            q["on"] = part_title(q) in inc
+        ids = [q["id"] for q in parts]
+        sk = WK + "_sel"
+        if ss.get(sk) not in ids + [None]:
+            ss.pop(sk, None)
+        pid = st.selectbox(
+            "edit a part", ids, index=None, key=sk,
+            placeholder="choose a part to edit its size or material",
+            format_func=lambda i: next(
+                f"{part_title(q)}  ·  z {q['z0']:g} to {q['z1']:g}"
+                for q in parts if q["id"] == i))
+        p = next((q for q in parts if q["id"] == pid), None)
+        if p is not None:
+            with st.container(border=True):
+                def cw(widget, label, k, **kw):
+                    key = f"cw_{pid}_{k}"
+                    if key not in ss:
+                        ss[key] = p[k]
+                    p[k] = widget(label, key=key, **kw)
+                    return p[k]
+
+                def cnum(label, k, lo, hi, step):
+                    return cw(st.number_input, label, k, min_value=float(lo),
+                              max_value=float(hi), step=float(step))
+
+                cw(st.text_input, "name", "name",
+                   help="Parts with the same name are shown, coloured and "
+                        "switched on and off together.")
+                cw(st.radio, "shape", "kind",
+                   options=["cylinder / ring", "box"], horizontal=True)
+                opts = SOLIDS if p["mat"] in SOLIDS else SOLIDS + [p["mat"]]
+                m = cw(st.selectbox, "material", "mat", options=opts,
+                       format_func=mat_label)
+                source_note(m)
+                a, b = st.columns(2)
+                if p["kind"] == "box":
+                    with a:
+                        cnum("size x", "sx", 0.05, 40.0, 0.1)
+                        cnum("centre x", "cx", -20.0, 20.0, 0.1)
+                    with b:
+                        cnum("size y", "sy", 0.05, 40.0, 0.1)
+                        cnum("centre y", "cy", -20.0, 20.0, 0.1)
+                else:
+                    with a:
+                        cnum("inner radius (0 = solid)", "r_in", 0.0, 20.0,
+                             0.1)
+                        cnum("centre x", "cx", -20.0, 20.0, 0.1)
+                    with b:
+                        cnum("outer radius", "r_out", 0.05, 20.0, 0.1)
+                        cnum("centre y", "cy", -20.0, 20.0, 0.1)
                 with a:
-                    cnum("size x", "sx", 0.05, 40.0, 0.1)
-                    cnum("centre x", "cx", -20.0, 20.0, 0.1)
+                    cnum("bottom height", "z0", -40.0, 80.0, 0.05)
                 with b:
-                    cnum("size y", "sy", 0.05, 40.0, 0.1)
-                    cnum("centre y", "cy", -20.0, 20.0, 0.1)
-            else:
-                with a:
-                    cnum("inner radius (0 = solid)", "r_in", 0.0, 20.0, 0.1)
-                    cnum("centre x", "cx", -20.0, 20.0, 0.1)
-                with b:
-                    cnum("outer radius", "r_out", 0.05, 20.0, 0.1)
-                    cnum("centre y", "cy", -20.0, 20.0, 0.1)
-            with a:
-                cnum("bottom height", "z0", -40.0, 80.0, 0.1)
-            with b:
-                cnum("top height", "z1", -40.0, 80.0, 0.1)
-            cnum("fill fraction", "fill", 0.05, 1.0, 0.05)
-            if st.button("Remove this part", key=f"rm_{pid}"):
-                ss.cust[E] = [q for q in ss.cust[E] if q["id"] != pid]
-                st.rerun()
-    if st.button("＋ Add a custom part", width="stretch",
+                    cnum("top height", "z1", -40.0, 80.0, 0.05)
+                cnum("fill fraction", "fill", 0.05, 1.0, 0.05)
+                if st.button("Remove this part", key=f"rm_{pid}"):
+                    ss.cust[E] = [q for q in parts if q["id"] != pid]
+                    ss["_reset_inc"] = True
+                    st.rerun()
+    if st.button("＋ Add a part", width="stretch",
                  help="Any cylinder, ring or box of any material: a holder, "
                       "a spacer, a screw, a lens..."):
-        ss.cust[E].append(dict(C.CUSTOM_DEFAULT, id=uuid.uuid4().hex[:8]))
+        new_id = uuid.uuid4().hex[:8]
+        ss.cust[E].append(dict(C.CUSTOM_DEFAULT, name="my part", id=new_id))
+        ss["_reset_inc"] = True
+        ss["_pending_sel"] = new_id
         st.rerun()
 
     # ------------------------------------------- detection and shimming
@@ -598,6 +646,13 @@ with left:
 
 
 # ------------------------------------------------------------- figures
+def colour(label):
+    return COLORS.get(label) or C.PART_COLORS.get(label) or COLORS["custom"]
+
+
+BASE_ORDER = ["glass", "sample", "plug", "waveguide", "modulation coil",
+              "shield"]
+
 COLORS = {"glass": "#9aa7b8", "sample": "#f0b05a", "RF coil": "#c0703a",
           "waveguide": "#b59a3c", "shield": "#7f8c9b",
           "modulation coil": "#a0522d", "custom": "#5aa58a",
@@ -629,16 +684,23 @@ def preview(cfg, det, compact=False, frame=None):
     h = max(0.04, 2*half/500)
     x = np.arange(-half + h/2, half, h)
     z = np.arange(zlo + h/2, zhi, h)
+    along_y = ss.get("cut_plane", "x") == "y"
+    if along_y:
+        # look along x instead: turn the probe a quarter turn about z
+        cfg = dict(cfg, c_phase=cfg["c_phase"] - 90.0, custom=[
+            dict(q, cx=q["cy"], cy=-q["cx"], sx=q["sy"], sy=q["sx"])
+            for q in cfg.get("custom", [])])
     _, masks = C.build_all(cfg, x, np.array([0.0]), z)
     img = np.ones((len(z), len(x), 3)) * np.array(mpl.colors.to_rgb("#f3f5f8"))
     shown = []
-    for name in ["glass", "sample", "plug", "waveguide", "modulation coil",
-                 "shield", "custom", "RF coil"]:
+    extra = [k for k in masks if k not in BASE_ORDER + ["RF coil"]]
+    for name in extra + BASE_ORDER + ["RF coil"]:
         if name in masks:
             m = masks[name][:, 0, :].T
             if m.any():
-                img[m] = mpl.colors.to_rgb(COLORS[name])
+                img[m] = mpl.colors.to_rgb(colour(name))
                 shown.append(name)
+    shown = [n for n in BASE_ORDER + ["RF coil"] + extra if n in shown]
     fig, ax = plt.subplots(figsize=(3.6, 5.6) if compact else (6.2, 5.0))
     ax.imshow(img, origin="lower", aspect="equal", interpolation="nearest",
               extent=[x[0]-h/2, x[-1]+h/2, z[0]-h/2, z[-1]+h/2])
@@ -647,7 +709,7 @@ def preview(cfg, det, compact=False, frame=None):
                                ec=P.INK, lw=1.4, ls=(0, (4, 3))))
     ax.axhline(0.0, color=P.INK, lw=0.8, alpha=0.5)
     ax.text(x[0], 0.0, " z = 0", fontsize=8, color=P.MUTED, va="bottom")
-    handles = [mpl.patches.Patch(color=COLORS[n], label=n) for n in shown]
+    handles = [mpl.patches.Patch(color=colour(n), label=n) for n in shown]
     handles.append(mpl.lines.Line2D([], [], color=P.INK, ls=(0, (4, 3)),
                                     lw=1.4, label="detected region"))
     if compact:
@@ -656,7 +718,7 @@ def preview(cfg, det, compact=False, frame=None):
     else:
         ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.02, 1),
                   fontsize=8.5, frameon=False)
-    ax.set_xlabel("x  (mm)")
+    ax.set_xlabel("y  (mm)" if along_y else "x  (mm)")
     ax.set_ylabel("height  (mm)")
     ax.set_title("cut through the axis")
     fig.tight_layout()
@@ -1054,6 +1116,11 @@ def ab_results(R):
 
 def tab_result():
     st.subheader("Preview")
+    if "cut_plane" not in ss:
+        ss.cut_plane = "x"
+    st.radio("cut plane", ["x", "y"], key="cut_plane", horizontal=True,
+             format_func=lambda v: f"through the {v} axis",
+             label_visibility="collapsed")
     pcols = st.columns(len(SETUPS))
     frame = None
     if AB:                          # same scale for both pictures
@@ -1247,14 +1314,45 @@ def tab_sweep():
 
 
 # ------------------------------------------------------------- 3D view
-def fig3d(cfg, cut=True):
+CAD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "frascan_cad.npz")
+CAD_TIP = 1.0        # height of the tube tip above the waveguide in the CAD
+CAD_COL = {"copper parts": ("#c0703a", 1.0), "brass parts": ("#b59a3c", 1.0),
+           "PEEK parts": ("#d8cfa6", 1.0), "lid (SLA resin)": ("#c9c9d4", 1.0),
+           "glass former": ("#bcd3e6", 0.35),
+           "chip capacitors": ("#6b5b95", 1.0)}
+
+
+@st.cache_resource(show_spinner=False)
+def load_cad():
+    """The real probe-head meshes exported from the Fusion assembly, if the
+    file is there. Heights are moved to the probe frame and everything
+    more than 24 mm below the waveguide top is cut off."""
+    if not os.path.exists(CAD_FILE):
+        return None
+    d = np.load(CAD_FILE)
+    out = {}
+    for k in d.files:
+        if k.endswith("|V"):
+            g = k[:-2]
+            V = d[k].astype(float).copy()
+            T = d[g + "|T"]
+            V[:, 2] += CAD_TIP
+            T = T[V[T][:, :, 2].max(axis=1) > -24.0]
+            V[:, 2] = np.maximum(V[:, 2], -24.0)
+            out[g] = (V, T)
+    return out
+
+
+def fig3d(cfg, cut=True, cad=None):
     """The probe as rotatable surfaces. Drawn from the same numbers the
-    solver uses; a picture, not the voxel model."""
+    solver uses; a picture, not the voxel model. With `cad`, the probe
+    parts are the real CAD meshes instead (tube and sample stay ours)."""
     phi = np.linspace(0, 1.5*np.pi if cut else 2*np.pi, 73)
     tr, seen = [], set()
 
     def surf(x, y, z, part, op):
-        col = COLORS[part]
+        col = colour(part)
         tr.append(go.Surface(
             x=x, y=y, z=z, surfacecolor=np.zeros_like(z),
             colorscale=[[0, col], [1, col]], showscale=False, opacity=op,
@@ -1312,8 +1410,21 @@ def fig3d(cfg, cut=True):
         cyl(ri, zl1, zl1 + cfg["p_top_len"], "plug", 0.95)
         disc(0, ri, zl1 + cfg["p_top_len"], "plug", 0.95)
 
+    if cad:
+        for g, (V, T) in cad.items():
+            col, op = CAD_COL.get(g, ("#999999", 1.0))
+            if cut:                       # same quarter removed as above
+                c = V[T].mean(axis=1)
+                T = T[~((c[:, 0] > 0) & (c[:, 1] < 0))]
+            tr.append(go.Mesh3d(
+                x=V[:, 0], y=V[:, 1], z=V[:, 2], i=T[:, 0], j=T[:, 1],
+                k=T[:, 2], color=col, opacity=op, name=g, showlegend=True,
+                hoverinfo="name", flatshading=False,
+                lighting=dict(ambient=0.6, diffuse=0.7, specular=0.1,
+                              roughness=0.7)))
+
     # ---- RF coil: a sheet with its slots or windows cut out
-    if cfg["c_on"]:
+    if cfg["c_on"] and not cad:
         pf = np.linspace(phi[0], phi[-1], 241)
         bot = cfg["c_zc"] - cfg["c_len"]/2
         zz = np.linspace(bot, bot + cfg["c_len"], 121)
@@ -1338,14 +1449,16 @@ def fig3d(cfg, cut=True):
              "RF coil", 1.0)
 
     # ---- waveguide (its lower part is cut short for the picture)
-    if cfg["w_on"]:
+    if cfg["w_on"] and not cad:
         wt = cfg["w_top"]
         ring(cfg["w_id"]/2, cfg["w_id"]/2 + cfg["w_wall"],
              wt - min(cfg["w_len"], 12.0), wt, "waveguide", 1.0)
 
     # ---- shields, modulation coil, custom parts
-    for kind, p, label in C._parts(cfg):
+    for kind, p, label in ([] if cad else C._parts(cfg)):
         op = {"shield": 0.55, "modulation coil": 1.0}.get(label, 0.9)
+        if p["r_out"] > 12 if kind != "box" else False:
+            op = min(op, 0.55)          # big housings: keep the inside visible
         if kind == "annulus":
             ring(p["r_in"], p["r_out"], p["z0"], p["z1"], label, op)
         elif kind == "cyl":
@@ -1358,7 +1471,7 @@ def fig3d(cfg, cut=True):
             Y = [y0, y0, y1, y1, y0, y0, y1, y1]
             Z = [p["z0"]]*4 + [p["z1"]]*4
             tr.append(go.Mesh3d(
-                x=X, y=Y, z=Z, color=COLORS[label], opacity=op, name=label,
+                x=X, y=Y, z=Z, color=colour(label), opacity=op, name=label,
                 i=[0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 3, 3],
                 j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 0, 4],
                 k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7],
@@ -1404,10 +1517,20 @@ def tab_3d():
         return
     cut = st.toggle("cut-away (remove a quarter to see inside)", value=True,
                     key="cut3d")
+    cad = None
+    if ss.preset[E] == "FRASCAN II" and load_cad():
+        if st.toggle("show the real CAD parts", value=True, key="cad3d",
+                     help="On: the probe head as drawn in Fusion (every "
+                          "screw and capacitor). Off: the simplified probe "
+                          "the calculation actually uses."):
+            cad = load_cad()
     st.caption("Drag to rotate, scroll to zoom, click a name in the legend "
-               "to hide that part.")
+               "to hide that part."
+               + (" The tube and sample follow your settings; the rest is "
+                  "the CAD. The calculation uses the simplified parts "
+                  "(switch the CAD off to see them)." if cad else ""))
     try:
-        st.plotly_chart(fig3d(cfg_now(), cut), width="stretch")
+        st.plotly_chart(fig3d(cfg_now(), cut, cad), width="stretch")
     except Exception as ex:
         st.error(f"This geometry cannot be drawn in 3D: {ex}")
 

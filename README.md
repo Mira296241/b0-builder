@@ -46,6 +46,19 @@ The right side now has four tabs: **Result, Sweep, 3D view, About**.
 - **Share by link**: "Create a link to this setup" packs the setup into the web address.
 - **30-second tour** on first open, and a **feedback** link (`FEEDBACK_URL` at the top of builder.py).
 
+### FRASCAN II from the real CAD (9 Nov 2026, evening)
+
+The FRASCAN II preset is now read from the STEP export of the Fusion assembly (NMR_Probe_v617), not from hand measurements.
+
+- **Corrected**: tube 4.98 mm OD with 0.39 mm wall (was 0.5), tube tip 1.0 mm above the waveguide (was 0.5), 34 mm of sample (was 45), coil windows 90° wide facing ±y (was 88°).
+- **Added, they were missing**: the borosilicate glass former under the RF coil, the coil ground ring, the PEEK modulation coil spool, the SLA lid, the PEEK electronics support, and the two chip capacitors at the coil slits.
+- **Extra parts panel**: parts have names, parts with the same name are switched on and off together ("included in the calculation"), and you pick one to edit.
+- **The capacitors are OFF by default.** Their susceptibility is not known (entered as alumina, an estimate). Switched on they dominate the result, so find out their real value before trusting either number.
+- **Preview**: choose the cut plane, through x or through y (the windows face y).
+- **3D view**: if `frascan_cad.npz` is in the folder, the FRASCAN II preset can show the real CAD of the probe head. Delete that file to keep the design out of a public copy; everything else works without it.
+
+Predicted FWHM for the preset (toluene, 500 MHz, 0.5 Hz baseline), capacitors off: 19 Hz at 2nd order shimming, 8.9 Hz at 3rd, 1.2 Hz at 4th.
+
 What the tool still cannot know: the magnet's own inhomogeneity and how well the shims were actually set. It predicts what the probe and sample ADD, assuming ideal shimming up to the chosen order.
 
 Differences from app.py, all small: the builder removes the uniform background before the FFT (a uniform medium only shifts the field, which the lock removes; this removes the fake edge of the computation box), uses a faster real FFT, and sizes the box to hold every part. On the FRASCAN II preset the two agree to about 3 % (6.2 vs 6.0 Hz FWHM).
