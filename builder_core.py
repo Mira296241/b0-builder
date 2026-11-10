@@ -21,6 +21,8 @@ import threading
 import zlib
 from math import erf
 
+import os
+
 import numpy as np
 
 from b0core import (MATERIALS_PPM, SOURCES, build_tube, build_coil,
@@ -122,13 +124,60 @@ def f_obs(cfg):
 
 try:
     from scipy import fft as _fft
-    _KW = {"workers": -1}
+    _KW = {"workers": min(4, os.cpu_count() or 1)}
 except Exception:                                    # numpy fallback
     _fft = np.fft
     _KW = {}
 
-VOXELS = [0.15, 0.2, 0.25, 0.3, 0.4]
-CELL_LIMIT = 72e6          # padded FFT cells; about 1.2 GB peak at float64
+VOXELS = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5]
+
+# Memory. The solver's peak is about 18 bytes per padded FFT cell (measured
+# on the full FRASCAN II probe at four voxel sizes). A free hosting
+# container gives 1 GB, so the limit cannot be a fixed number: it is worked
+# out from what this machine actually has, and choose_grid then coarsens the
+# voxel until the job fits. Set B0_MEMORY_MB to override.
+BYTES_PER_CELL = 18.0
+_FFT_SHARE = 0.55          # of the budget; the rest is Python, the cache,
+                           # the figures and any other visitor
+
+
+def memory_budget_mb():
+    """What this process may use, in MB."""
+    env = os.environ.get("B0_MEMORY_MB")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    vals = []
+    for f in ("/sys/fs/cgroup/memory.max",
+              "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = open(f).read().strip()
+            if v.isdigit() and int(v) < (1 << 60):
+                vals.append(int(v) / 1e6)
+        except OSError:
+            pass
+    try:                                   # physical RAM, if readable
+        vals.append(os.sysconf("SC_PAGE_SIZE")
+                    * os.sysconf("SC_PHYS_PAGES") / 1e6)
+    except (ValueError, OSError):
+        pass
+    return min(vals) if vals else 1024.0
+
+
+def cell_limit():
+    """Largest padded FFT that fits in the budget."""
+    return max(4e6, memory_budget_mb() * 1e6 * _FFT_SHARE / BYTES_PER_CELL)
+
+
+CELL_LIMIT = cell_limit()
+
+
+def max_sweep_steps():
+    """A sweep is one full solve per point, and free servers cut the CPU of
+    anything that runs flat out for minutes. Keep it short there."""
+    return 15 if memory_budget_mb() > 1800 else 7
 
 
 # --------------------------------------------------------------- presets
@@ -407,12 +456,15 @@ def choose_grid(cfg):
     zlo, zhi = zlo - 1.5, zhi + 1.5
     V = float(cfg["V"])
     note = ""
+    limit = cell_limit()
     for v in [V] + [w for w in VOXELS if w > V]:
         cells = (2 * 2*half/v) ** 2 * (2 * (zhi - zlo)/v)
-        if cells <= CELL_LIMIT:
+        if cells <= limit:
             if v != V:
-                note = (f"Voxel raised from {V} to {v} mm to fit in memory "
-                        f"(the probe is big). Results are slightly coarser.")
+                note = (f"Voxel raised from {V} to {v} mm to fit in the "
+                        f"{memory_budget_mb()/1000:.1f} GB this server has. "
+                        "Results are slightly coarser; run it on your own "
+                        "computer for the finest grid.")
             V = v
             break
     else:

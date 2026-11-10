@@ -46,6 +46,14 @@ The right side now has four tabs: **Result, Sweep, 3D view, About**.
 - **Share by link**: "Create a link to this setup" packs the setup into the web address.
 - **30-second tour** on first open, and a **feedback** link (`FEEDBACK_URL` at the top of builder.py).
 
+### Memory and free servers (10 Nov 2026)
+
+The solver used to allow a fixed 72 million padded FFT cells, which peaks at about 1.3 GB. A free Streamlit Community Cloud container has 1 GB, so the FRASCAN II preset throttled or crashed it.
+
+The limit now follows the machine. The solver's peak is about 18 bytes per padded cell (measured on the full probe at several voxel sizes), it reads the container's cgroup limit or the physical RAM, and spends at most 55 % of it on the FFT. On a 1 GB server the FRASCAN II preset drops to a 0.35 mm voxel (444 MB peak, FWHM 20.0 Hz instead of 18.7); on a 2 GB machine it keeps 0.25 mm. The chosen voxel and the reason are shown in the app. Set `B0_MEMORY_MB` to override.
+
+Sweeps are capped at 7 points on servers under 1.8 GB, because each point is a full solve and free hosts throttle anything that runs flat out for minutes.
+
 ### FRASCAN II from the real CAD (9 Nov 2026, evening)
 
 The FRASCAN II preset is now read from the STEP export of the Fusion assembly (NMR_Probe_v617), not from hand measurements.

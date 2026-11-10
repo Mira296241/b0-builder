@@ -249,8 +249,11 @@ with sb.expander("Accuracy (advanced)" + (f", setup {E}" if AB else "")):
     W(st.select_slider, "voxel size (mm)", "V", options=C.VOXELS,
       help="The cube size the space is cut into. Smaller = more accurate "
            "but slower and more memory. 0.25 mm is a good default.")
-    st.caption("Big probes are coarsened automatically if they would not "
-               "fit in memory.")
+    mb = C.memory_budget_mb()
+    st.caption(f"This server has about **{mb/1000:.1f} GB**. The solver "
+               f"keeps its grid under {C.cell_limit()/1e6:.0f} million cells "
+               "and coarsens the voxel automatically if a probe would not "
+               "fit. On your own computer the limit follows your own RAM.")
     if st.button("Check the solver", width="stretch",
                  help="Solves a case with an exact textbook answer (a "
                       "uniform sphere) at this voxel size and reports the "
@@ -1258,7 +1261,12 @@ def tab_sweep():
                         key=f"sw_from_{E}_{key}")
     v1 = b.number_input("to", lo, hi, float(np.clip(cur + half, lo, hi)),
                         key=f"sw_to_{E}_{key}")
-    n = d.number_input("steps", 3, 15, 7, key=f"sw_n_{E}")
+    nmax = C.max_sweep_steps()
+    n = d.number_input("steps", 3, nmax, min(7, nmax), key=f"sw_n_{E}",
+                       help=None if nmax >= 15 else
+                       "Limited to 7 on this server: each step is a full "
+                       "solve, and free servers throttle long runs. Run the "
+                       "app on your own computer for longer sweeps.")
     st.caption(f"Now: **{cur:g}**. Each step is a full field calculation, "
                "so a big probe takes a few seconds per step.")
     if st.button("▶  Run the sweep", type="primary", width="stretch"):
