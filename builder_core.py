@@ -219,7 +219,12 @@ STANDARD = dict(BLANK, t_wall=0.4, t_liquid="chloroform-d",
 # 9 Nov 2026). z = 0 is the waveguide top; the CAD has the tube tip 1.0 mm
 # above it. Materials from J. Dubsky's thesis, section 2.3.
 FRASCAN = dict(BLANK,
-    t_OD=4.98, t_wall=0.39, t_fill=34.0, t_glass="fused quartz",
+    # 4 mm quartz EPR tube, confirmed by Jan Dubsky 12 Nov 2026: "Standard
+    # is 5 mm, but we found out that for DNP 4 mm is better... Ideally, the
+    # tube should be quartz, as its more transparent to microwaves."
+    # Was 4.98 / 0.39 (a 5 mm NMR tube) until then; the HFSS model had the
+    # 4 mm one all along, which is why the two disagreed.
+    t_OD=4.0, t_wall=0.5, t_fill=34.0, t_glass="fused quartz",
     t_liquid="toluene", t_tip=1.0, t_bottom="round", t_botdepth=2.45,
     c_on=True, c_r=5.0, c_t=100.0, c_len=39.0, c_zc=15.0, c_nslots=2,
     c_slotdeg=90.0, c_phase=90.0, c_win=True, c_winz0=12.0, c_winh=15.0,
