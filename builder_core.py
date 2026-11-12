@@ -272,6 +272,19 @@ FRASCAN_PARTS = [
     _ring("electronics support (PEEK)", "PEEK", 10.05, 17.93, -3.25, -0.75),
     dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, 6.09, 3.0, 2.02, 4.98, 7.5), on=False),
     dict(_box(_CAP, "ceramic (chip capacitor)", 0.0, -6.09, 3.0, 2.02, 4.98, 7.5), on=False),
+    # Proposed passive compensation ring (12 Nov 2026). A 2 mm slice of quartz
+    # tubing slid over the sample tube just above the waveguide top, between
+    # the tube and the coil former. Its position and strength were found by
+    # least squares against the shimmed residual, which the solver allows
+    # because it is first order in chi: solve the probe once, solve a unit
+    # ring once, and the best amplitude is one line of algebra. The optimum
+    # came out at -13.2 ppm against air, which is very nearly solid fused
+    # quartz (-11.6), so no exotic material is needed. Predicted: 6.59 -> 3.46
+    # ppb with Honza's shim set (toluene, capacitors off), i.e. the line
+    # narrows about 1.9x for the same signal area. Flat from z = -3 to +3, so
+    # placement is not critical. OFF until it is built and measured.
+    dict(_ring("compensation ring (quartz, proposed)", "fused quartz",
+               2.05, 3.0, 1.0, 3.0), on=False),
 ]
 
 TUBE3 = dict(BLANK, t_OD=3.0, t_wall=0.29, t_liquid="chloroform-d",
@@ -319,7 +332,8 @@ PART_COLORS = {"RF coil former (glass)": "#bcd3e6",
                "RF coil ground": "#c98a5a",
                _SP: "#d8cfa6", _LID: "#c9c9d4",
                "electronics support (PEEK)": "#b9ad82",
-               _CAP: "#6b5b95"}
+               _CAP: "#6b5b95",
+               "compensation ring (quartz, proposed)": "#c44536"}
 
 CUSTOM_DEFAULT = dict(name="", on=True,
                       kind="cylinder / ring", mat="PTFE", r_in=0.0,  # a small PTFE lens below the tube

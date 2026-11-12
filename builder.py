@@ -1523,11 +1523,22 @@ def tab_3d():
         st.info("The 3D view needs the plotly package. Install it with "
                 "`pip install plotly` and restart the app.")
         return
+    # Streamlit runs every tab's body on every rerun, visible or not, so an
+    # ungated fig3d() rebuilt the whole mesh (and the CAD on the FRASCAN
+    # preset) every time any setting changed. It is the slowest step in the
+    # app, so it now waits to be asked for.
+    if not st.toggle("draw it", value=False, key="show3d",
+                     help="Off by default. Building the 3D view is the "
+                          "slowest step in the app, and it would otherwise "
+                          "run again every time you change any setting."):
+        st.caption("Switch this on to draw the probe. Everything else in the "
+                   "app stays faster while it is off.")
+        return
     cut = st.toggle("cut-away (remove a quarter to see inside)", value=True,
                     key="cut3d")
     cad = None
     if ss.preset[E] == "FRASCAN II" and load_cad():
-        if st.toggle("show the real CAD parts", value=True, key="cad3d",
+        if st.toggle("show the real CAD parts", value=False, key="cad3d",
                      help="On: the probe head as drawn in Fusion (every "
                           "screw and capacitor). Off: the simplified probe "
                           "the calculation actually uses."):
